@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap } from 'lucide-react';
 import './App.css';
 
@@ -319,6 +319,7 @@ function App() {
   const [tempSettings, setTempSettings] = useState(loadReminderSettings);
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
+  const editFormRef = useRef(null);
 
   function persist(next) {
     setRecords(next);
@@ -386,10 +387,21 @@ function App() {
 
   function saveEdit() {
     if (!selected) return;
+    const formValues = {};
+    if (editFormRef.current) {
+      const data = new FormData(editFormRef.current);
+      appConfig.fields.forEach((field) => {
+        const value = data.get(field.key);
+        if (value !== null) formValues[field.key] = String(value);
+      });
+      const status = data.get('status');
+      if (status !== null) formValues.status = String(status);
+    }
+    const nextEditForm = { ...editForm, ...formValues };
     const next = records.map((item) => item.id === selected.id ? {
       ...item,
-      ...editForm,
-      timeline: [...(item.timeline || []), { status: editForm.status || item.status, at: today, by: '编辑' }]
+      ...nextEditForm,
+      timeline: [...(item.timeline || []), { status: nextEditForm.status || item.status, at: today, by: '编辑' }]
     } : item);
     persist(next);
     const updated = next.find((item) => item.id === selected.id);
@@ -890,12 +902,13 @@ function App() {
                   <div className="panel-title" style={{marginBottom: '12px'}}>
                     <h2 style={{fontSize: '16px'}}>编辑设备信息</h2>
                   </div>
-                  <div className="form-grid" style={{gridTemplateColumns: '1fr'}}>
+                  <form ref={editFormRef} className="form-grid" style={{gridTemplateColumns: '1fr'}}>
                     {appConfig.fields.map((field) => (
                       <label key={field.key}>
                         <span>{field.label}</span>
                         {field.type === 'select' ? (
                           <select
+                            name={field.key}
                             value={editForm[field.key] || ''}
                             onChange={(event) => setEditForm({ ...editForm, [field.key]: event.target.value })}
                           >
@@ -903,6 +916,7 @@ function App() {
                           </select>
                         ) : (
                           <input
+                            name={field.key}
                             type={field.type}
                             value={editForm[field.key] || ''}
                             onChange={(event) => setEditForm({ ...editForm, [field.key]: event.target.value })}
@@ -914,13 +928,14 @@ function App() {
                     <label>
                       <span>当前状态</span>
                       <select
+                        name="status"
                         value={editForm.status || ''}
                         onChange={(event) => setEditForm({ ...editForm, status: event.target.value })}
                       >
                         {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
                       </select>
                     </label>
-                  </div>
+                  </form>
                   <div className="modal-actions" style={{justifyContent: 'flex-start', marginTop: '16px'}}>
                     <button type="button" className="primary" style={{width: 'auto', marginTop: 0, padding: '10px 20px'}} onClick={saveEdit}>保存</button>
                     <button type="button" className="secondary-btn" onClick={cancelEdit}>取消</button>
