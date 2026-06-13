@@ -503,3 +503,237 @@ textarea { min-height: 76px; resize: vertical; }
   .calendar-cell { min-height: auto; }
   .week-label { min-width: auto; font-size: 13px; }
 }
+
+.hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border: 1px solid #d0d5dd;
+  background: #fff;
+  border-radius: 6px;
+  color: #344054;
+  font-weight: 600;
+  font-size: 14px;
+  transition: all .15s;
+}
+
+.view-switch:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: #f8fafc;
+}
+
+.view-switch.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  gap: 18px;
+  align-items: start;
+  margin-top: 18px;
+}
+
+.owners-panel .panel-title {
+  margin-bottom: 16px;
+}
+
+.owner-cards {
+  display: grid;
+  gap: 12px;
+  max-height: 720px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.owner-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  background: #ffffff;
+  cursor: pointer;
+  transition: all .16s;
+}
+
+.owner-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, .08);
+}
+
+.owner-card.selected {
+  border-color: var(--accent);
+  border-width: 2px;
+  background: #eff6ff;
+  box-shadow: 0 4px 16px rgba(37, 99, 235, .12);
+}
+
+.owner-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.owner-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #eef2ff;
+  color: var(--accent);
+  display: grid;
+  place-content: center;
+}
+
+.owner-card.selected .owner-avatar {
+  background: var(--accent);
+  color: #fff;
+}
+
+.owner-info h3 {
+  font-size: 16px;
+  color: #111827;
+}
+
+.owner-info p {
+  font-size: 13px;
+  color: #667085;
+  margin-top: 2px;
+}
+
+.owner-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.stat-item {
+  display: grid;
+  gap: 4px;
+  text-align: center;
+  padding: 8px 6px;
+  border-radius: 6px;
+  background: #f9fafb;
+}
+
+.stat-item.status-a { background: #eef2ff; }
+.stat-item.status-a .stat-num { color: #3730a3; }
+.stat-item.status-b { background: #ecfeff; }
+.stat-item.status-b .stat-num { color: #0e7490; }
+.stat-item.status-c { background: #ecfdf3; }
+.stat-item.status-c .stat-num { color: #047857; }
+.stat-item.overdue { background: #fef2f2; }
+.stat-item.overdue .stat-num { color: #be123c; }
+
+.stat-num {
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.stat-label {
+  font-size: 11px;
+  color: #667085;
+  font-weight: 600;
+}
+
+.owner-detail-panel .panel-title {
+  margin-bottom: 14px;
+}
+
+.owner-records {
+  display: grid;
+  gap: 12px;
+  max-height: 720px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.owner-record-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 14px;
+  background: #ffffff;
+}
+
+.owner-record-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.owner-record-head h4 {
+  font-size: 15px;
+  margin: 0;
+  color: #111827;
+}
+
+.owner-record-head p {
+  font-size: 13px;
+  color: #667085;
+  margin-top: 4px;
+}
+
+.owner-record-item .record-detail {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #344054;
+}
+
+.owner-record-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.owner-record-actions button {
+  border: 1px solid #d0d5dd;
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all .15s;
+}
+
+.owner-record-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+@media (max-width: 980px) {
+  .workbench {
+    grid-template-columns: 1fr;
+  }
+  .hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .view-switch {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 620px) {
+  .owner-stats {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .stat-num {
+    font-size: 18px;
+  }
+  .owner-avatar {
+    width: 38px;
+    height: 38px;
+  }
+}

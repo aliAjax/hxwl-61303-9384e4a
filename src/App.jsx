@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar } from 'lucide-react';
+import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -240,6 +240,8 @@ function App() {
   const [viewMode, setViewMode] = useState('group');
   const [weekOffset, setWeekOffset] = useState(0);
   const [selectedDate, setSelectedDate] = useState(null);
+  const [selectedOwner, setSelectedOwner] = useState(null);
+  const [workbenchView, setWorkbenchView] = useState(false);
 
   function persist(next) {
     setRecords(next);
@@ -362,17 +364,53 @@ function App() {
     return filteredRecords.filter((item) => item.nextDate === selectedDate && item.status !== '已完成');
   }, [filteredRecords, selectedDate]);
 
+  const groupedByOwner = useMemo(() => {
+    const groups = {};
+    records.forEach((item) => {
+      const owner = item.owner || '未分配';
+      if (!groups[owner]) {
+        groups[owner] = {
+          owner,
+          total: 0,
+          pending: 0,
+          today: 0,
+          overdue: 0,
+          completed: 0,
+          items: []
+        };
+      }
+      groups[owner].total++;
+      groups[owner].items.push(item);
+      if (item.status === '待维保') groups[owner].pending++;
+      if (item.status === '今日执行') groups[owner].today++;
+      if (item.nextDate < today && item.status !== '已完成') groups[owner].overdue++;
+      if (item.status === '已完成') groups[owner].completed++;
+    });
+    return Object.values(groups).sort((a, b) => b.overdue - a.overdue || b.total - a.total);
+  }, [records]);
+
+  const selectedOwnerRecords = useMemo(() => {
+    if (!selectedOwner) return [];
+    return records.filter((item) => (item.owner || '未分配') === selectedOwner);
+  }, [records, selectedOwner]);
+
   return (
     <main className="shell" style={{ '--accent': appConfig.accent }}>
       <section className="hero">
         <div>
           <div className="eyebrow"><Building2 size={18} />{appConfig.domain}</div>
-          <h1>{appConfig.title}</h1>
-          <p>{appConfig.subtitle}</p>
+          <h1>{workbenchView ? '负责人工作台' : appConfig.title}</h1>
+          <p>{workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : appConfig.subtitle}</p>
         </div>
-        <div className="port-card">
-          <span>Local Port</span>
-          <strong>{appConfig.port}</strong>
+        <div className="hero-actions">
+          <button className={'view-switch ' + (workbenchView ? '' : 'active')} onClick={() => { setWorkbenchView(false); setSelectedOwner(null); }}>
+            <LayoutGrid size={16} />
+            路线看板
+          </button>
+          <button className={'view-switch ' + (workbenchView ? 'active' : '')} onClick={() => { setWorkbenchView(true); setSelectedDate(null); }}>
+            <Users size={16} />
+            负责人工作台
+          </button>
         </div>
       </section>
 
@@ -385,7 +423,92 @@ function App() {
         ))}
       </section>
 
-      <section className="workspace">
+      {workbenchView ? (
+        <section className="workbench">
+          <section className="panel owners-panel">
+            <div className="panel-title">
+              <Users size={18} />
+              <h2>负责人汇总</h2>
+            </div>
+            <div className="owner-cards">
+              {groupedByOwner.map((group) => (
+                <article
+                  key={group.owner}
+                  className={'owner-card ' + (selectedOwner === group.owner ? 'selected' : '')}
+                  onClick={() => setSelectedOwner(selectedOwner === group.owner ? null : group.owner)}
+                >
+                  <div className="owner-card-head">
+                    <div className="owner-avatar">
+                      <User size={20} />
+                    </div>
+                    <div className="owner-info">
+                      <h3>{group.owner}</h3>
+                      <p>共 {group.total} 台设备</p>
+                    </div>
+                  </div>
+                  <div className="owner-stats">
+                    <div className="stat-item status-a">
+                      <span className="stat-num">{group.pending}</span>
+                      <span className="stat-label">待维保</span>
+                    </div>
+                    <div className="stat-item status-b">
+                      <span className="stat-num">{group.today}</span>
+                      <span className="stat-label">今日执行</span>
+                    </div>
+                    <div className="stat-item overdue">
+                      <span className="stat-num">{group.overdue}</span>
+                      <span className="stat-label">逾期</span>
+                    </div>
+                    <div className="stat-item status-c">
+                      <span className="stat-num">{group.completed}</span>
+                      <span className="stat-label">已完成</span>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <aside className="panel owner-detail-panel">
+            <div className="panel-title">
+              <CheckCircle2 size={18} />
+              <h2>{selectedOwner ? `${selectedOwner} 的维保记录` : '记录详情'}</h2>
+            </div>
+            {selectedOwner ? (
+              selectedOwnerRecords.length ? (
+                <div className="owner-records">
+                  {selectedOwnerRecords.map((item) => (
+                    <div key={item.id} className="owner-record-item">
+                      <div className="owner-record-head">
+                        <div>
+                          <h4>{`${item.estate} ${item.building}`}</h4>
+                          <p>{`${item.elevatorNo} · ${item.cycle}`}</p>
+                        </div>
+                        <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                      </div>
+                      <p className="record-detail">{`下次维保：${item.nextDate}`}</p>
+                      {item.nextDate < today && item.status !== '已完成' && (
+                        <div className="warning"><AlertTriangle size={14} />已逾期</div>
+                      )}
+                      <div className="owner-record-actions">
+                        {appConfig.statuses.map((status) => (
+                          <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty">暂无维保记录。</p>
+              )
+            ) : (
+              <p className="empty">点击左侧负责人卡片，查看对应维保记录并修改状态。</p>
+            )}
+          </aside>
+        </section>
+      ) : (
+        <>
+        <section className="workspace">
         <form className="panel form-panel" onSubmit={addRecord}>
           <div className="panel-title">
             <ClipboardList size={18} />
@@ -577,6 +700,8 @@ function App() {
           )}
         </aside>
       </section>
+        </>
+      )}
     </main>
   );
 }
