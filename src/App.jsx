@@ -379,6 +379,56 @@ function App() {
   const [selectedRouteDate, setSelectedRouteDate] = useState(today);
   const [routeQuery, setRouteQuery] = useState('');
   const [expandedEstates, setExpandedEstates] = useState({});
+  const [showBackfillModal, setShowBackfillModal] = useState(false);
+  const [backfillItem, setBackfillItem] = useState(null);
+  const [backfillForm, setBackfillForm] = useState({ completedAt: '', executor: '', notes: '', nextDate: '' });
+
+  function computeNextDate(baseDate, cycle) {
+    const match = cycle && cycle.match(/(\d+)/);
+    if (!match || !baseDate) return '';
+    const days = parseInt(match[1], 10);
+    const d = new Date(baseDate + 'T00:00:00');
+    d.setDate(d.getDate() + days);
+    return formatDate(d);
+  }
+
+  function openBackfillModal(item) {
+    const nextDate = computeNextDate(today, item.cycle);
+    setBackfillItem(item);
+    setBackfillForm({
+      completedAt: today,
+      executor: item.owner || '',
+      notes: '',
+      nextDate
+    });
+    setShowBackfillModal(true);
+  }
+
+  function handleBackfillSubmit() {
+    if (!backfillItem) return;
+    const timelineEntry = {
+      status: '已完成',
+      at: backfillForm.completedAt || today,
+      by: backfillForm.executor || '操作员',
+      backfill: {
+        completedAt: backfillForm.completedAt || today,
+        executor: backfillForm.executor || '',
+        notes: backfillForm.notes || '',
+        nextDate: backfillForm.nextDate || ''
+      }
+    };
+    const next = records.map((item) => item.id === backfillItem.id ? {
+      ...item,
+      status: '已完成',
+      nextDate: backfillForm.nextDate || item.nextDate,
+      timeline: [...(item.timeline || []), timelineEntry]
+    } : item);
+    persist(next);
+    if (selected?.id === backfillItem.id) setSelected(next.find((item) => item.id === backfillItem.id));
+    setShowBackfillModal(false);
+    setBackfillItem(null);
+    setBackfillForm({ completedAt: '', executor: '', notes: '', nextDate: '' });
+  }
 
   function parseImportText(text) {
     const lines = text.trim().split('\n').filter(line => line.trim());
@@ -871,6 +921,78 @@ function App() {
           </button>
         </div>
       </section>
+
+      {showBackfillModal && backfillItem && (
+        <div className="modal-overlay" onClick={() => { setShowBackfillModal(false); setBackfillItem(null); }}>
+          <div className="modal-panel backfill-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <CheckCircle2 size={18} />
+                <h2>维保完成回填</h2>
+              </div>
+              <button className="modal-close" onClick={() => { setShowBackfillModal(false); setBackfillItem(null); }}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="backfill-device-info">
+              <strong>{backfillItem.estate} {backfillItem.building}</strong>
+              <span>{backfillItem.elevatorNo} · {backfillItem.cycle} · {backfillItem.owner}</span>
+            </div>
+            <div className="backfill-form">
+              <label className="backfill-label">
+                <span>完成时间</span>
+                <input
+                  type="date"
+                  value={backfillForm.completedAt}
+                  onChange={(e) => {
+                    const newCompletedAt = e.target.value;
+                    const newNextDate = computeNextDate(newCompletedAt, backfillItem.cycle);
+                    setBackfillForm({ ...backfillForm, completedAt: newCompletedAt, nextDate: newNextDate || backfillForm.nextDate });
+                  }}
+                />
+              </label>
+              <label className="backfill-label">
+                <span>执行人</span>
+                <input
+                  type="text"
+                  value={backfillForm.executor}
+                  onChange={(e) => setBackfillForm({ ...backfillForm, executor: e.target.value })}
+                  placeholder="请输入执行人姓名"
+                />
+              </label>
+              <label className="backfill-label wide">
+                <span>现场备注</span>
+                <textarea
+                  value={backfillForm.notes}
+                  onChange={(e) => setBackfillForm({ ...backfillForm, notes: e.target.value })}
+                  placeholder="记录维保现场情况、更换部件、异常发现等"
+                  rows={3}
+                />
+              </label>
+              <label className="backfill-label">
+                <span>下次维保日期</span>
+                <input
+                  type="date"
+                  value={backfillForm.nextDate}
+                  onChange={(e) => setBackfillForm({ ...backfillForm, nextDate: e.target.value })}
+                />
+              </label>
+              {backfillItem.cycle && backfillForm.completedAt && (
+                <p className="backfill-hint">
+                  根据维保周期（{backfillItem.cycle}）自动推算，可手动调整
+                </p>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="secondary-btn" onClick={() => { setShowBackfillModal(false); setBackfillItem(null); }}>取消</button>
+              <button type="button" className="primary" onClick={handleBackfillSubmit}>
+                <CheckCircle2 size={16} />
+                确认完成
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showSettings && (
         <div className="modal-overlay" onClick={() => setShowSettings(false)}>
@@ -1415,7 +1537,7 @@ function App() {
                       )}
                       <div className="owner-record-actions">
                         {appConfig.statuses.map((status) => (
-                          <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
+                          <button key={status} type="button" onClick={() => status === '已完成' ? openBackfillModal(item) : updateStatus(item.id, status)}>{status}</button>
                         ))}
                       </div>
                     </div>
@@ -1503,7 +1625,7 @@ function App() {
                 {(item.conflict || hasOverlap(item, records)) && <div className="warning"><AlertTriangle size={15} />发现冲突</div>}
                 <div className="actions" onClick={(event) => event.stopPropagation()}>
                   {appConfig.statuses.map((status) => (
-                    <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
+                    <button key={status} type="button" onClick={() => status === '已完成' ? openBackfillModal(item) : updateStatus(item.id, status)}>{status}</button>
                   ))}
                   {appConfig.action === 'copyRecipe' && <button type="button" onClick={() => duplicateRecord(item)}><RotateCcw size={14} />复制</button>}
                   {appConfig.chart && <button type="button" onClick={() => addTemperature(item)}>加温度</button>}
@@ -1718,7 +1840,20 @@ function App() {
                   )}
                   <div className="timeline">
                     {(selected.timeline || []).map((step, index) => (
-                      <span key={index}>{step.at} · {step.status} · {step.by}</span>
+                      <div key={index} className={'timeline-entry ' + (step.backfill ? 'timeline-backfill' : '')}>
+                        <div className="timeline-main">
+                          <span className="timeline-status">{step.status}</span>
+                          <span className="timeline-at">{step.at}</span>
+                          <span className="timeline-by">{step.by}</span>
+                        </div>
+                        {step.backfill && (
+                          <div className="timeline-backfill-detail">
+                            {step.backfill.executor && <span className="backfill-field"><strong>执行人：</strong>{step.backfill.executor}</span>}
+                            {step.backfill.notes && <span className="backfill-field"><strong>现场备注：</strong>{step.backfill.notes}</span>}
+                            {step.backfill.nextDate && <span className="backfill-field"><strong>下次维保：</strong>{step.backfill.nextDate}</span>}
+                          </div>
+                        )}
+                      </div>
                     ))}
                   </div>
                 </>

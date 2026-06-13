@@ -222,11 +222,49 @@ textarea { min-height: 76px; resize: vertical; }
 .detail { display: grid; gap: 10px; }
 .detail p, .empty { color: #667085; line-height: 1.6; }
 .timeline { display: grid; gap: 6px; margin-top: 8px; }
-.timeline span {
+.timeline-entry {
   border-left: 3px solid var(--accent);
   padding: 7px 10px;
   background: #f8fafc;
   color: #475467;
+}
+.timeline-entry.timeline-backfill {
+  border-left-color: #10b981;
+  background: #f0fdf4;
+}
+.timeline-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.timeline-status {
+  font-weight: 700;
+  color: #111827;
+}
+.timeline-at {
+  color: #667085;
+  font-size: 13px;
+}
+.timeline-by {
+  color: #667085;
+  font-size: 13px;
+}
+.timeline-backfill-detail {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #d1fae5;
+}
+.backfill-field {
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.5;
+}
+.backfill-field strong {
+  color: #111827;
+  font-weight: 600;
 }
 .temp-chart {
   display: flex;
@@ -1753,6 +1791,73 @@ textarea { min-height: 76px; resize: vertical; }
 
 @media (max-width: 1100px) {
   .route-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.backfill-modal {
+  width: min(520px, 94vw);
+}
+
+.backfill-device-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.backfill-device-info strong {
+  color: #111827;
+  font-size: 15px;
+}
+
+.backfill-device-info span {
+  color: #667085;
+  font-size: 13px;
+}
+
+.backfill-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.backfill-label {
+  display: grid;
+  gap: 6px;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.backfill-label.wide {
+  grid-column: 1 / -1;
+}
+
+.backfill-label textarea {
+  min-height: 72px;
+}
+
+.backfill-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 8px 12px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+@media (max-width: 620px) {
+  .backfill-form {
     grid-template-columns: 1fr;
   }
 }
