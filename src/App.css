@@ -1241,3 +1241,500 @@ textarea { min-height: 76px; resize: vertical; }
     grid-template-columns: repeat(3, 1fr);
   }
 }
+
+.route-planning {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.route-header-panel {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.route-date-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.route-date-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 16px;
+  border: 1px solid #d0d5dd;
+  background: #fff;
+  border-radius: 8px;
+  color: #344054;
+  font-weight: 600;
+  transition: all .15s;
+  position: relative;
+  min-width: 72px;
+}
+
+.route-date-tab:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: #f8fafc;
+}
+
+.route-date-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.route-date-day {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.route-date-num {
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.route-date-dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+}
+
+.route-date-tab.active .route-date-dot {
+  background: #fff;
+}
+
+.save-route-btn {
+  width: auto;
+  padding: 10px 20px;
+  margin: 0;
+}
+
+.route-layout {
+  display: grid;
+  grid-template-columns: 380px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.route-search {
+  margin-bottom: 14px;
+}
+
+.estate-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 720px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.estate-group {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafbfc;
+  overflow: hidden;
+}
+
+.estate-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #111827;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  transition: background .15s;
+}
+
+.estate-group-header:hover {
+  background: #f8fafc;
+}
+
+.estate-group-header strong {
+  flex: 1;
+  font-size: 14px;
+}
+
+.estate-count {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
+  background: #f1f5f9;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.estate-chevron {
+  color: #667085;
+  transition: transform .2s;
+}
+
+.estate-chevron.expanded {
+  transform: rotate(180deg);
+}
+
+.estate-devices {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.estate-device {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  transition: all .15s;
+}
+
+.estate-device:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, .06);
+}
+
+.estate-device.completed {
+  opacity: 0.7;
+}
+
+.estate-device-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.estate-device-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.estate-device-head h4 {
+  font-size: 14px;
+  color: #111827;
+}
+
+.estate-device-info p {
+  font-size: 12px;
+  color: #667085;
+  line-height: 1.4;
+}
+
+.estate-device-actions {
+  flex-shrink: 0;
+}
+
+.small-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.small-btn.primary {
+  margin: 0;
+  width: auto;
+}
+
+.add-to-route-select {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid #d0d5dd;
+  background: #fff;
+  color: #344054;
+  cursor: pointer;
+}
+
+.add-to-route-select:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.route-updated {
+  font-size: 12px;
+  color: #98a2b3;
+  font-weight: 500;
+  margin-left: 8px;
+}
+
+.empty-routes {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: #98a2b3;
+  text-align: center;
+  gap: 12px;
+}
+
+.empty-routes p {
+  font-size: 14px;
+}
+
+.routes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 760px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.route-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.route-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e5e7eb;
+  gap: 12px;
+}
+
+.route-card-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+
+.route-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 800;
+  font-size: 14px;
+}
+
+.route-name-input {
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 6px 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #111827;
+  border-radius: 6px;
+  flex: 1;
+  max-width: 280px;
+}
+
+.route-name-input:hover,
+.route-name-input:focus {
+  border-color: #d0d5dd;
+  background: #fff;
+  outline: none;
+}
+
+.route-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.route-count {
+  font-size: 13px;
+  color: #667085;
+  font-weight: 600;
+}
+
+.small-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d0d5dd;
+  background: #fff;
+  border-radius: 6px;
+  color: #344054;
+  transition: all .15s;
+}
+
+.small-icon-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: #f8fafc;
+}
+
+.small-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.small-icon-btn.ghost-danger {
+  color: #b42318;
+}
+
+.small-icon-btn.ghost-danger:hover {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b42318;
+}
+
+.empty-route-devices {
+  padding: 20px;
+  text-align: center;
+  color: #98a2b3;
+  font-size: 13px;
+}
+
+.route-devices {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.route-device {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: #fafbfc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  transition: all .15s;
+}
+
+.route-device:hover {
+  border-color: #cbd5e1;
+  background: #fff;
+}
+
+.route-device.completed {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.route-device-order {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  color: #98a2b3;
+  flex-shrink: 0;
+  width: 32px;
+}
+
+.route-device-order span {
+  font-size: 14px;
+  font-weight: 800;
+  color: #111827;
+}
+
+.route-device-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.route-device-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.route-device-head h4 {
+  font-size: 14px;
+  color: #111827;
+}
+
+.route-device-info p {
+  font-size: 12px;
+  color: #667085;
+  line-height: 1.4;
+}
+
+.route-completed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.route-device-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.estate-device.reminder-overdue,
+.route-device.reminder-overdue {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+.estate-device.reminder-today,
+.route-device.reminder-today {
+  border-color: #fdba74;
+  background: #fff7ed;
+}
+
+.estate-device.reminder-soon,
+.route-device.reminder-soon {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+@media (max-width: 1100px) {
+  .route-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .route-header-panel {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .route-header-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+  .save-route-btn {
+    width: 100%;
+  }
+  .route-date-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 4px;
+  }
+  .route-date-tab {
+    min-width: 64px;
+    flex-shrink: 0;
+    padding: 8px 12px;
+  }
+}

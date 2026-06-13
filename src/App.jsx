@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle } from 'lucide-react';
+import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -164,6 +164,47 @@ const DEFAULT_REMINDER_SETTINGS = {
   '30天': 7
 };
 
+const ROUTE_PLANS_STORAGE_KEY = 'hxwl-61303-route-plans';
+
+function getNextDays(count) {
+  const dates = [];
+  const now = new Date(today);
+  for (let i = 0; i < count; i++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() + i);
+    dates.push(formatDate(d));
+  }
+  return dates;
+}
+
+function loadRoutePlans() {
+  const raw = localStorage.getItem(ROUTE_PLANS_STORAGE_KEY);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function saveRoutePlans(plans) {
+  localStorage.setItem(ROUTE_PLANS_STORAGE_KEY, JSON.stringify(plans));
+}
+
+function getEmptyRoutePlan(date) {
+  return {
+    date,
+    routes: [],
+    updatedAt: null
+  };
+}
+
+function routeUid() {
+  return 'rt_' + Math.random().toString(36).slice(2, 10);
+}
+
 function loadReminderSettings() {
   const raw = localStorage.getItem(REMINDER_STORAGE_KEY);
   if (raw) {
@@ -323,6 +364,11 @@ function App() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [importText, setImportText] = useState('');
   const [parsedImport, setParsedImport] = useState(null);
+  const [routePlanningView, setRoutePlanningView] = useState(false);
+  const [routePlans, setRoutePlans] = useState(loadRoutePlans);
+  const [selectedRouteDate, setSelectedRouteDate] = useState(today);
+  const [routeQuery, setRouteQuery] = useState('');
+  const [expandedEstates, setExpandedEstates] = useState({});
 
   function parseImportText(text) {
     const lines = text.trim().split('\n').filter(line => line.trim());
@@ -642,26 +688,172 @@ function App() {
     return records.filter((item) => (item.owner || '未分配') === selectedOwner);
   }, [records, selectedOwner]);
 
+  const routeDates = useMemo(() => getNextDays(8), []);
+
+  const currentRoutePlan = useMemo(() => {
+    return routePlans[selectedRouteDate] || getEmptyRoutePlan(selectedRouteDate);
+  }, [routePlans, selectedRouteDate]);
+
+  const allDeviceIdsInRoutes = useMemo(() => {
+    const ids = new Set();
+    currentRoutePlan.routes.forEach((route) => {
+      route.deviceIds.forEach((id) => ids.add(id));
+    });
+    return ids;
+  }, [currentRoutePlan]);
+
+  const pendingDevicesByEstate = useMemo(() => {
+    const grouped = {};
+    records
+      .filter((item) => {
+        if (item.nextDate !== selectedRouteDate) return false;
+        if (allDeviceIdsInRoutes.has(item.id)) return false;
+        if (!routeQuery) return true;
+        return `${item.estate}${item.building}${item.elevatorNo}${item.owner}`.includes(routeQuery);
+      })
+      .forEach((item) => {
+        if (!grouped[item.estate]) grouped[item.estate] = [];
+        grouped[item.estate].push(item);
+      });
+    Object.keys(grouped).forEach((estate) => {
+      grouped[estate].sort((a, b) => String(a.building).localeCompare(String(b.building)));
+    });
+    return grouped;
+  }, [records, selectedRouteDate, allDeviceIdsInRoutes, routeQuery]);
+
+  const getRecordById = (id) => records.find((r) => r.id === id);
+
+  function persistRoutePlans(nextPlans) {
+    setRoutePlans(nextPlans);
+    saveRoutePlans(nextPlans);
+  }
+
+  function createRoute(estateName) {
+    const newRoute = {
+      id: routeUid(),
+      estate: estateName || '未命名路线',
+      deviceIds: []
+    };
+    const nextPlan = {
+      ...currentRoutePlan,
+      routes: [...currentRoutePlan.routes, newRoute],
+      updatedAt: new Date().toISOString()
+    };
+    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+  }
+
+  function renameRoute(routeId, newName) {
+    const nextPlan = {
+      ...currentRoutePlan,
+      routes: currentRoutePlan.routes.map((r) =>
+        r.id === routeId ? { ...r, estate: newName } : r
+      ),
+      updatedAt: new Date().toISOString()
+    };
+    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+  }
+
+  function removeRoute(routeId) {
+    const nextPlan = {
+      ...currentRoutePlan,
+      routes: currentRoutePlan.routes.filter((r) => r.id !== routeId),
+      updatedAt: new Date().toISOString()
+    };
+    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+  }
+
+  function addDeviceToRoute(deviceId, routeId) {
+    const nextPlan = {
+      ...currentRoutePlan,
+      routes: currentRoutePlan.routes.map((r) =>
+        r.id === routeId && !r.deviceIds.includes(deviceId)
+          ? { ...r, deviceIds: [...r.deviceIds, deviceId] }
+          : r
+      ),
+      updatedAt: new Date().toISOString()
+    };
+    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+  }
+
+  function removeDeviceFromRoute(deviceId, routeId) {
+    const nextPlan = {
+      ...currentRoutePlan,
+      routes: currentRoutePlan.routes.map((r) =>
+        r.id === routeId
+          ? { ...r, deviceIds: r.deviceIds.filter((id) => id !== deviceId) }
+          : r
+      ),
+      updatedAt: new Date().toISOString()
+    };
+    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+  }
+
+  function moveDeviceInRoute(deviceId, routeId, direction) {
+    const route = currentRoutePlan.routes.find((r) => r.id === routeId);
+    if (!route) return;
+    const idx = route.deviceIds.indexOf(deviceId);
+    if (idx === -1) return;
+    const newIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (newIdx < 0 || newIdx >= route.deviceIds.length) return;
+    const newDeviceIds = [...route.deviceIds];
+    [newDeviceIds[idx], newDeviceIds[newIdx]] = [newDeviceIds[newIdx], newDeviceIds[idx]];
+    const nextPlan = {
+      ...currentRoutePlan,
+      routes: currentRoutePlan.routes.map((r) =>
+        r.id === routeId ? { ...r, deviceIds: newDeviceIds } : r
+      ),
+      updatedAt: new Date().toISOString()
+    };
+    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+  }
+
+  function toggleEstate(estate) {
+    setExpandedEstates({ ...expandedEstates, [estate]: !expandedEstates[estate] });
+  }
+
+  function handleSaveRoutePlan() {
+    const finalPlan = {
+      ...currentRoutePlan,
+      updatedAt: new Date().toISOString()
+    };
+    persistRoutePlans({ ...routePlans, [selectedRouteDate]: finalPlan });
+    alert('路线方案已保存！');
+  }
+
+  function getDeviceRouteStatus(deviceId) {
+    for (const route of currentRoutePlan.routes) {
+      const idx = route.deviceIds.indexOf(deviceId);
+      if (idx !== -1) {
+        return { routeId: route.id, routeName: route.estate, position: idx + 1 };
+      }
+    }
+    return null;
+  }
+
   return (
     <main className="shell" style={{ '--accent': appConfig.accent }}>
       <section className="hero">
         <div>
           <div className="eyebrow"><Building2 size={18} />{appConfig.domain}</div>
-          <h1>{workbenchView ? '负责人工作台' : appConfig.title}</h1>
-          <p>{workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : appConfig.subtitle}</p>
+          <h1>{routePlanningView ? '维保路线编排' : (workbenchView ? '负责人工作台' : appConfig.title)}</h1>
+          <p>{routePlanningView ? '按楼盘聚合待维保设备，灵活编排每日维保路线并保存方案' : (workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : appConfig.subtitle)}</p>
         </div>
         <div className="hero-actions">
           <button className="settings-btn" onClick={openSettings} title="维保提醒设置">
             <Settings size={16} />
             提醒设置
           </button>
-          <button className={'view-switch ' + (workbenchView ? '' : 'active')} onClick={() => { setWorkbenchView(false); setSelectedOwner(null); }}>
+          <button className={'view-switch ' + (!routePlanningView && !workbenchView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(false); setSelectedOwner(null); }}>
             <LayoutGrid size={16} />
             路线看板
           </button>
-          <button className={'view-switch ' + (workbenchView ? 'active' : '')} onClick={() => { setWorkbenchView(true); setSelectedDate(null); }}>
+          <button className={'view-switch ' + (workbenchView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(true); setSelectedDate(null); }}>
             <Users size={16} />
             负责人工作台
+          </button>
+          <button className={'view-switch ' + (routePlanningView ? 'active' : '')} onClick={() => { setRoutePlanningView(true); setWorkbenchView(false); }}>
+            <Route size={16} />
+            路线编排
           </button>
         </div>
       </section>
@@ -856,7 +1048,258 @@ function App() {
         ))}
       </section>
 
-      {workbenchView ? (
+      {routePlanningView ? (
+        <section className="route-planning">
+          <div className="panel route-header-panel">
+            <div className="route-date-tabs">
+              {routeDates.map((date, idx) => {
+                const d = new Date(date);
+                const dayLabel = idx === 0 ? '今日' : weekdayLabels[(d.getDay() + 6) % 7];
+                const plan = routePlans[date];
+                const hasPlan = plan && plan.routes && plan.routes.length > 0;
+                return (
+                  <button
+                    key={date}
+                    className={'route-date-tab ' + (selectedRouteDate === date ? 'active' : '')}
+                    onClick={() => setSelectedRouteDate(date)}
+                  >
+                    <span className="route-date-day">{dayLabel}</span>
+                    <span className="route-date-num">{d.getMonth() + 1}/{d.getDate()}</span>
+                    {hasPlan && <span className="route-date-dot" />}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="route-header-actions">
+              <button className="primary save-route-btn" onClick={handleSaveRoutePlan}>
+                <Save size={16} />
+                保存路线方案
+              </button>
+            </div>
+          </div>
+
+          <div className="route-layout">
+            <section className="panel route-devices-panel">
+              <div className="panel-title-with-actions">
+                <div className="panel-title">
+                  <MapPin size={18} />
+                  <h2>待编排设备（{selectedRouteDate}）</h2>
+                </div>
+              </div>
+              <div className="search route-search">
+                <Search size={16} />
+                <input
+                  value={routeQuery}
+                  onChange={(e) => setRouteQuery(e.target.value)}
+                  placeholder="搜索楼盘/楼栋/编号/负责人"
+                />
+              </div>
+              <div className="estate-groups">
+                {Object.keys(pendingDevicesByEstate).length === 0 ? (
+                  <p className="empty">
+                    {routeQuery ? '没有匹配的设备。' : selectedRouteDate + ' 暂无待编排设备，所有设备已加入路线或已完成。'}
+                  </p>
+                ) : (
+                  Object.entries(pendingDevicesByEstate).map(([estate, items]) => {
+                    const expanded = expandedEstates[estate] !== false;
+                    return (
+                      <div key={estate} className="estate-group">
+                        <div className="estate-group-header" onClick={() => toggleEstate(estate)}>
+                          <Building2 size={16} />
+                          <strong>{estate}</strong>
+                          <span className="estate-count">{items.length} 台</span>
+                          <ChevronDown size={16} className={'estate-chevron ' + (expanded ? 'expanded' : '')} />
+                        </div>
+                        {expanded && (
+                          <div className="estate-devices">
+                            {items.map((item) => {
+                              const rs = getReminderStatus(item, reminderSettings);
+                              return (
+                                <div
+                                  key={item.id}
+                                  className={'estate-device ' + reminderStatusClass(rs.type) + (item.status === '已完成' ? ' completed' : '')}
+                                >
+                                  <div className="estate-device-info">
+                                    <div className="estate-device-head">
+                                      <h4>{item.building}</h4>
+                                      <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                                    </div>
+                                    <p>{item.elevatorNo} · {item.cycle} · {item.owner}</p>
+                                    {rs.type !== 'none' && (
+                                      <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
+                                        {rs.type === 'overdue' && <AlertTriangle size={12} />}
+                                        {rs.type === 'today' && <Zap size={12} />}
+                                        {rs.type === 'soon' && <Bell size={12} />}
+                                        {rs.label}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="estate-device-actions">
+                                    {currentRoutePlan.routes.length === 0 ? (
+                                      <button
+                                        className="primary small-btn"
+                                        onClick={() => createRoute(estate)}
+                                      >
+                                        <Plus size={14} />
+                                        创建路线
+                                      </button>
+                                    ) : (
+                                      <select
+                                        className="add-to-route-select"
+                                        defaultValue=""
+                                        onChange={(e) => {
+                                          if (e.target.value) {
+                                            addDeviceToRoute(item.id, e.target.value);
+                                            e.target.value = '';
+                                          }
+                                        }}
+                                      >
+                                        <option value="">加入路线...</option>
+                                        {currentRoutePlan.routes.map((r) => (
+                                          <option key={r.id} value={r.id}>{r.estate}（{r.deviceIds.length}台）</option>
+                                        ))}
+                                      </select>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+
+            <section className="panel route-list-panel">
+              <div className="panel-title-with-actions">
+                <div className="panel-title">
+                  <Route size={18} />
+                  <h2>路线清单</h2>
+                  {currentRoutePlan.updatedAt && (
+                    <span className="route-updated">最后更新：{new Date(currentRoutePlan.updatedAt).toLocaleString('zh-CN')}</span>
+                  )}
+                </div>
+                <button className="secondary-btn small-btn" onClick={() => createRoute('')}>
+                  <Plus size={14} />
+                  新增路线
+                </button>
+              </div>
+
+              {currentRoutePlan.routes.length === 0 ? (
+                <div className="empty-routes">
+                  <Route size={48} />
+                  <p>暂无路线，点击"新增路线"或从左侧设备创建路线</p>
+                </div>
+              ) : (
+                <div className="routes-list">
+                  {currentRoutePlan.routes.map((route, routeIdx) => (
+                    <div key={route.id} className="route-card">
+                      <div className="route-card-header">
+                        <div className="route-card-title">
+                          <span className="route-index">{routeIdx + 1}</span>
+                          <input
+                            className="route-name-input"
+                            value={route.estate}
+                            onChange={(e) => renameRoute(route.id, e.target.value)}
+                          />
+                        </div>
+                        <div className="route-card-actions">
+                          <span className="route-count">{route.deviceIds.length} 台</span>
+                          <button
+                            className="ghost-danger small-icon-btn"
+                            onClick={() => {
+                              if (confirm(`确定删除路线"${route.estate}"吗？路线中的设备将移出。`)) {
+                                removeRoute(route.id);
+                              }
+                            }}
+                            title="删除路线"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {route.deviceIds.length === 0 ? (
+                        <p className="empty-route-devices">路线为空，从左侧设备列表添加</p>
+                      ) : (
+                        <div className="route-devices">
+                          {route.deviceIds.map((deviceId, idx) => {
+                            const item = getRecordById(deviceId);
+                            if (!item) return null;
+                            const rs = getReminderStatus(item, reminderSettings);
+                            const isCompleted = item.status === '已完成';
+                            return (
+                              <div
+                                key={deviceId}
+                                className={'route-device ' + reminderStatusClass(rs.type) + (isCompleted ? ' completed' : '')}
+                              >
+                                <div className="route-device-order">
+                                  <GripVertical size={16} />
+                                  <span>{idx + 1}</span>
+                                </div>
+                                <div className="route-device-info">
+                                  <div className="route-device-head">
+                                    <h4>{item.estate} {item.building}</h4>
+                                    {isCompleted ? (
+                                      <span className="status status-c route-completed">
+                                        <CheckCircle2 size={12} />
+                                        已完成
+                                      </span>
+                                    ) : (
+                                      <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                                    )}
+                                  </div>
+                                  <p>{item.elevatorNo} · {item.cycle} · {item.owner}</p>
+                                  {rs.type !== 'none' && !isCompleted && (
+                                    <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
+                                      {rs.type === 'overdue' && <AlertTriangle size={12} />}
+                                      {rs.type === 'today' && <Zap size={12} />}
+                                      {rs.type === 'soon' && <Bell size={12} />}
+                                      {rs.label}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="route-device-actions">
+                                  <button
+                                    className="small-icon-btn"
+                                    onClick={() => moveDeviceInRoute(deviceId, route.id, 'up')}
+                                    disabled={idx === 0}
+                                    title="上移"
+                                  >
+                                    <ArrowUp size={14} />
+                                  </button>
+                                  <button
+                                    className="small-icon-btn"
+                                    onClick={() => moveDeviceInRoute(deviceId, route.id, 'down')}
+                                    disabled={idx === route.deviceIds.length - 1}
+                                    title="下移"
+                                  >
+                                    <ArrowDown size={14} />
+                                  </button>
+                                  <button
+                                    className="ghost-danger small-icon-btn"
+                                    onClick={() => removeDeviceFromRoute(deviceId, route.id)}
+                                    title="移出路线"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+        </section>
+      ) : workbenchView ? (
         <section className="workbench">
           <section className="panel owners-panel">
             <div className="panel-title">
