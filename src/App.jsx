@@ -359,7 +359,7 @@ function App() {
 
   const selectedDateRecords = useMemo(() => {
     if (!selectedDate) return [];
-    return filteredRecords.filter((item) => item.nextDate === selectedDate);
+    return filteredRecords.filter((item) => item.nextDate === selectedDate && item.status !== '已完成');
   }, [filteredRecords, selectedDate]);
 
   return (
