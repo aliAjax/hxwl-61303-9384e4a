@@ -155,7 +155,21 @@ const appConfig = {
   }
 };
 
-const today = new Date().toISOString().slice(0, 10);
+function getLocalToday() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+const today = getLocalToday();
+
+function daysBetween(dateText1, dateText2) {
+  const d1 = new Date(dateText1 + 'T00:00:00');
+  const d2 = new Date(dateText2 + 'T00:00:00');
+  return Math.round((d1.getTime() - d2.getTime()) / 86400000);
+}
 
 const REMINDER_STORAGE_KEY = 'hxwl-61303-reminder-settings';
 const DEFAULT_REMINDER_SETTINGS = {
@@ -168,7 +182,7 @@ const ROUTE_PLANS_STORAGE_KEY = 'hxwl-61303-route-plans';
 
 function getNextDays(count) {
   const dates = [];
-  const now = new Date(today);
+  const now = new Date(today + 'T00:00:00');
   for (let i = 0; i < count; i++) {
     const d = new Date(now);
     d.setDate(now.getDate() + i);
@@ -226,9 +240,7 @@ function getReminderStatus(item, reminderSettings) {
   if (!item.nextDate) return { type: 'none', label: '', daysLeft: null };
   if (item.status === '已完成') return { type: 'none', label: '', daysLeft: null };
 
-  const date = new Date(item.nextDate);
-  const now = new Date(today);
-  const diff = Math.round((date.getTime() - now.getTime()) / 86400000);
+  const diff = daysBetween(item.nextDate, today);
 
   if (diff < 0) {
     return { type: 'overdue', label: '已逾期', daysLeft: diff };
@@ -284,9 +296,7 @@ function money(value) {
 
 function inNextDays(dateText, days) {
   if (!dateText) return false;
-  const date = new Date(dateText);
-  const now = new Date(today);
-  const diff = (date.getTime() - now.getTime()) / 86400000;
+  const diff = daysBetween(dateText, today);
   return diff >= 0 && diff <= days;
 }
 
@@ -706,20 +716,24 @@ function App() {
     const grouped = {};
     records
       .filter((item) => {
-        if (item.nextDate !== selectedRouteDate) return false;
+        if (!inNextDays(item.nextDate, 7)) return false;
         if (allDeviceIdsInRoutes.has(item.id)) return false;
         if (!routeQuery) return true;
-        return `${item.estate}${item.building}${item.elevatorNo}${item.owner}`.includes(routeQuery);
+        return `${item.estate}${item.building}${item.elevatorNo}${item.owner}${item.nextDate}`.includes(routeQuery);
       })
       .forEach((item) => {
         if (!grouped[item.estate]) grouped[item.estate] = [];
         grouped[item.estate].push(item);
       });
     Object.keys(grouped).forEach((estate) => {
-      grouped[estate].sort((a, b) => String(a.building).localeCompare(String(b.building)));
+      grouped[estate].sort((a, b) => {
+        const dateDiff = daysBetween(a.nextDate, b.nextDate);
+        if (dateDiff !== 0) return dateDiff;
+        return String(a.building).localeCompare(String(b.building));
+      });
     });
     return grouped;
-  }, [records, selectedRouteDate, allDeviceIdsInRoutes, routeQuery]);
+  }, [records, allDeviceIdsInRoutes, routeQuery]);
 
   const getRecordById = (id) => records.find((r) => r.id === id);
 
@@ -1083,7 +1097,7 @@ function App() {
               <div className="panel-title-with-actions">
                 <div className="panel-title">
                   <MapPin size={18} />
-                  <h2>待编排设备（{selectedRouteDate}）</h2>
+                  <h2>待编排设备（今日~未来7天）</h2>
                 </div>
               </div>
               <div className="search route-search">
@@ -1091,13 +1105,13 @@ function App() {
                 <input
                   value={routeQuery}
                   onChange={(e) => setRouteQuery(e.target.value)}
-                  placeholder="搜索楼盘/楼栋/编号/负责人"
+                  placeholder="搜索楼盘/楼栋/编号/负责人/日期"
                 />
               </div>
               <div className="estate-groups">
                 {Object.keys(pendingDevicesByEstate).length === 0 ? (
                   <p className="empty">
-                    {routeQuery ? '没有匹配的设备。' : selectedRouteDate + ' 暂无待编排设备，所有设备已加入路线或已完成。'}
+                    {routeQuery ? '没有匹配的设备。' : '今日到未来7天暂无待编排设备，所有设备已加入路线或已完成。'}
                   </p>
                 ) : (
                   Object.entries(pendingDevicesByEstate).map(([estate, items]) => {
@@ -1114,6 +1128,11 @@ function App() {
                           <div className="estate-devices">
                             {items.map((item) => {
                               const rs = getReminderStatus(item, reminderSettings);
+                              const dateDiff = daysBetween(item.nextDate, today);
+                              let dateLabel = '';
+                              if (dateDiff === 0) dateLabel = '今日维保';
+                              else if (dateDiff === 1) dateLabel = '明日维保';
+                              else dateLabel = `+${dateDiff}天维保`;
                               return (
                                 <div
                                   key={item.id}
@@ -1125,6 +1144,12 @@ function App() {
                                       <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                                     </div>
                                     <p>{item.elevatorNo} · {item.cycle} · {item.owner}</p>
+                                    <div className="device-date-row">
+                                      <span className={'device-date-tag ' + (dateDiff === 0 ? 'date-today' : dateDiff === 1 ? 'date-tomorrow' : 'date-later')}>
+                                        <Calendar size={12} />
+                                        {item.nextDate} · {dateLabel}
+                                      </span>
+                                    </div>
                                     {rs.type !== 'none' && (
                                       <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
                                         {rs.type === 'overdue' && <AlertTriangle size={12} />}
@@ -1231,6 +1256,12 @@ function App() {
                             if (!item) return null;
                             const rs = getReminderStatus(item, reminderSettings);
                             const isCompleted = item.status === '已完成';
+                            const dateDiff = daysBetween(item.nextDate, today);
+                            let dateLabel = '';
+                            if (dateDiff === 0) dateLabel = '今日维保';
+                            else if (dateDiff === 1) dateLabel = '明日维保';
+                            else if (dateDiff > 1) dateLabel = `+${dateDiff}天维保`;
+                            else dateLabel = `逾期${Math.abs(dateDiff)}天`;
                             return (
                               <div
                                 key={deviceId}
@@ -1253,6 +1284,12 @@ function App() {
                                     )}
                                   </div>
                                   <p>{item.elevatorNo} · {item.cycle} · {item.owner}</p>
+                                  <div className="device-date-row">
+                                    <span className={'device-date-tag ' + (dateDiff === 0 ? 'date-today' : dateDiff === 1 ? 'date-tomorrow' : dateDiff > 1 ? 'date-later' : 'date-overdue')}>
+                                      <Calendar size={12} />
+                                      {item.nextDate} · {dateLabel}
+                                    </span>
+                                  </div>
                                   {rs.type !== 'none' && !isCompleted && (
                                     <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
                                       {rs.type === 'overdue' && <AlertTriangle size={12} />}
