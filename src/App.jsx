@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap } from 'lucide-react';
+import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -320,6 +320,117 @@ function App() {
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const editFormRef = useRef(null);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [parsedImport, setParsedImport] = useState(null);
+
+  function parseImportText(text) {
+    const lines = text.trim().split('\n').filter(line => line.trim());
+    const records = [];
+    lines.forEach((line, lineIndex) => {
+      const trimmed = line.trim();
+      let parts;
+      if (trimmed.includes('\t')) {
+        parts = trimmed.split('\t');
+      } else if (trimmed.includes('，')) {
+        parts = trimmed.split('，');
+      } else if (trimmed.includes(',')) {
+        parts = trimmed.split(',');
+      } else {
+        parts = trimmed.split(/\s+/);
+      }
+      parts = parts.map(p => p.trim());
+      const [estate, building, elevatorNo, cycle, nextDate, owner] = parts;
+      records.push({
+        lineIndex,
+        rawLine: trimmed,
+        estate: estate || '',
+        building: building || '',
+        elevatorNo: elevatorNo || '',
+        cycle: cycle || '',
+        nextDate: nextDate || '',
+        owner: owner || '',
+        errors: []
+      });
+    });
+    return records;
+  }
+
+  function validateImportRecords(parsedRecords) {
+    const validCycles = appConfig.fields.find(f => f.key === 'cycle')?.options || [];
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    const seenElevatorNos = {};
+    const recordsWithErrors = parsedRecords.map((record) => {
+      const errors = [];
+      if (!record.estate) errors.push({ type: 'missing', field: '楼盘' });
+      if (!record.building) errors.push({ type: 'missing', field: '楼栋' });
+      if (!record.elevatorNo) {
+        errors.push({ type: 'missing', field: '电梯编号' });
+      } else {
+        if (seenElevatorNos[record.elevatorNo]) {
+          errors.push({ type: 'duplicate', field: '电梯编号', value: record.elevatorNo });
+        } else {
+          seenElevatorNos[record.elevatorNo] = true;
+        }
+      }
+      if (!record.cycle) {
+        errors.push({ type: 'missing', field: '维保周期' });
+      } else if (!validCycles.includes(record.cycle)) {
+        errors.push({ type: 'invalidCycle', field: '维保周期', value: record.cycle });
+      }
+      if (!record.nextDate) {
+        errors.push({ type: 'missing', field: '下次维保日期' });
+      } else if (!datePattern.test(record.nextDate)) {
+        errors.push({ type: 'invalidDate', field: '下次维保日期', value: record.nextDate });
+      } else {
+        const date = new Date(record.nextDate);
+        if (isNaN(date.getTime())) {
+          errors.push({ type: 'invalidDate', field: '下次维保日期', value: record.nextDate });
+        }
+      }
+      if (!record.owner) errors.push({ type: 'missing', field: '负责人' });
+      return { ...record, errors };
+    });
+
+    const existingRecordNos = new Set(records.map(r => r.elevatorNo));
+    recordsWithErrors.forEach((record) => {
+      if (record.elevatorNo && existingRecordNos.has(record.elevatorNo)) {
+        record.errors.push({ type: 'duplicateExisting', field: '电梯编号', value: record.elevatorNo });
+      }
+    });
+
+    return recordsWithErrors;
+  }
+
+  function handleImportPreview() {
+    const parsed = parseImportText(importText);
+    const validated = validateImportRecords(parsed);
+    setParsedImport(validated);
+  }
+
+  function handleConfirmImport() {
+    if (!parsedImport) return;
+    const validRecords = parsedImport.filter(r => r.errors.length === 0);
+    if (validRecords.length === 0) return;
+
+    const newRecords = validRecords.map((record) => ({
+      id: uid(),
+      estate: record.estate,
+      building: record.building,
+      elevatorNo: record.elevatorNo,
+      cycle: record.cycle,
+      nextDate: record.nextDate,
+      owner: record.owner,
+      status: appConfig.primaryStatus,
+      createdAt: new Date().toISOString(),
+      timeline: [{ status: appConfig.primaryStatus, at: today, by: '批量导入' }]
+    }));
+
+    persist([...newRecords, ...records]);
+    setShowImportModal(false);
+    setImportText('');
+    setParsedImport(null);
+  }
 
   function persist(next) {
     setRecords(next);
@@ -597,6 +708,145 @@ function App() {
         </div>
       )}
 
+      {showImportModal && (
+        <div className="modal-overlay" onClick={() => { setShowImportModal(false); setParsedImport(null); }}>
+          <div className="modal-panel import-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <Upload size={18} />
+                <h2>批量导入预检</h2>
+              </div>
+              <button className="modal-close" onClick={() => { setShowImportModal(false); setParsedImport(null); }}>
+                <X size={18} />
+              </button>
+            </div>
+            <p className="hint">
+              粘贴多行电梯维保数据，支持制表符、逗号、空格分隔。字段顺序：楼盘、楼栋、电梯编号、维保周期、下次维保日期、负责人。
+            </p>
+
+            <label className="import-label">
+              <span>数据内容</span>
+              <textarea
+                className="import-textarea"
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+                placeholder="星河湾 3栋 E-032 15天 2026-06-13 赵师傅&#10;海棠府 1栋 E-118 15天 2026-06-12 钱师傅"
+                rows={6}
+              />
+            </label>
+
+            <button type="button" className="primary" onClick={handleImportPreview} disabled={!importText.trim()}>
+              <FileText size={16} />
+              预览校验
+            </button>
+
+            {parsedImport && (
+              <div className="import-preview">
+                <div className="import-stats">
+                  <div className="import-stat">
+                    <span className="import-stat-label">总计</span>
+                    <strong className="import-stat-value">{parsedImport.length}</strong>
+                  </div>
+                  <div className="import-stat success">
+                    <span className="import-stat-label">可导入</span>
+                    <strong className="import-stat-value">{parsedImport.filter(r => r.errors.length === 0).length}</strong>
+                  </div>
+                  <div className="import-stat error">
+                    <span className="import-stat-label">有错误</span>
+                    <strong className="import-stat-value">{parsedImport.filter(r => r.errors.length > 0).length}</strong>
+                  </div>
+                </div>
+
+                <div className="import-preview-list">
+                  {parsedImport.map((record, index) => (
+                    <div key={index} className={'import-preview-item ' + (record.errors.length > 0 ? 'has-error' : 'is-valid')}>
+                      <div className="import-preview-head">
+                        <span className="import-line-no">第 {index + 1} 行</span>
+                        {record.errors.length > 0 ? (
+                          <span className="import-status error">
+                            <XCircle size={14} />
+                            {record.errors.length} 处错误
+                          </span>
+                        ) : (
+                          <span className="import-status success">
+                            <CheckCircle2 size={14} />
+                            可导入
+                          </span>
+                        )}
+                      </div>
+                      <div className="import-preview-fields">
+                        <span className="import-field">
+                          <span className="import-field-label">楼盘</span>
+                          <span className={'import-field-value ' + (record.errors.some(e => e.field === '楼盘') ? 'error-value' : '')}>
+                            {record.estate || '—'}
+                          </span>
+                        </span>
+                        <span className="import-field">
+                          <span className="import-field-label">楼栋</span>
+                          <span className={'import-field-value ' + (record.errors.some(e => e.field === '楼栋') ? 'error-value' : '')}>
+                            {record.building || '—'}
+                          </span>
+                        </span>
+                        <span className="import-field">
+                          <span className="import-field-label">电梯编号</span>
+                          <span className={'import-field-value ' + (record.errors.some(e => e.field === '电梯编号') ? 'error-value' : '')}>
+                            {record.elevatorNo || '—'}
+                          </span>
+                        </span>
+                        <span className="import-field">
+                          <span className="import-field-label">维保周期</span>
+                          <span className={'import-field-value ' + (record.errors.some(e => e.field === '维保周期') ? 'error-value' : '')}>
+                            {record.cycle || '—'}
+                          </span>
+                        </span>
+                        <span className="import-field">
+                          <span className="import-field-label">下次维保日期</span>
+                          <span className={'import-field-value ' + (record.errors.some(e => e.field === '下次维保日期') ? 'error-value' : '')}>
+                            {record.nextDate || '—'}
+                          </span>
+                        </span>
+                        <span className="import-field">
+                          <span className="import-field-label">负责人</span>
+                          <span className={'import-field-value ' + (record.errors.some(e => e.field === '负责人') ? 'error-value' : '')}>
+                            {record.owner || '—'}
+                          </span>
+                        </span>
+                      </div>
+                      {record.errors.length > 0 && (
+                        <div className="import-errors">
+                          {record.errors.map((err, errIdx) => (
+                            <span key={errIdx} className="import-error-tag">
+                              <AlertTriangle size={12} />
+                              {err.type === 'missing' && `${err.field}缺失`}
+                              {err.type === 'duplicate' && `电梯编号重复（导入内）`}
+                              {err.type === 'duplicateExisting' && `电梯编号已存在`}
+                              {err.type === 'invalidDate' && `日期格式错误`}
+                              {err.type === 'invalidCycle' && `不支持的维保周期`}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-btn" onClick={() => { setShowImportModal(false); setParsedImport(null); }}>取消</button>
+              <button
+                type="button"
+                className="primary"
+                onClick={handleConfirmImport}
+                disabled={!parsedImport || parsedImport.filter(r => r.errors.length === 0).length === 0}
+              >
+                确认导入（{parsedImport ? parsedImport.filter(r => r.errors.length === 0).length : 0} 条）
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <section className="metrics">
         {metrics.map((metric) => (
           <article className="metric" key={metric.label}>
@@ -730,6 +980,10 @@ function App() {
             </label>
           </div>
           <button className="primary" type="submit"><Plus size={18} />新增</button>
+          <button type="button" className="secondary-btn import-btn" onClick={() => setShowImportModal(true)}>
+            <Upload size={16} />
+            批量导入
+          </button>
           <p className="hint">{appConfig.note}</p>
         </form>
 
