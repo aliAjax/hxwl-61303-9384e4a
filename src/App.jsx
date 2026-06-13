@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User } from 'lucide-react';
+import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -92,6 +92,24 @@ const appConfig = {
       "nextDate": "2026-06-25",
       "owner": "孙师傅",
       "status": "已完成"
+    },
+    {
+      "estate": "翠湖天地",
+      "building": "2栋",
+      "elevatorNo": "E-305",
+      "cycle": "15天",
+      "nextDate": "2026-06-15",
+      "owner": "李师傅",
+      "status": "待维保"
+    },
+    {
+      "estate": "金茂府",
+      "building": "5栋",
+      "elevatorNo": "E-410",
+      "cycle": "7天",
+      "nextDate": "2026-06-14",
+      "owner": "周师傅",
+      "status": "待维保"
     }
   ],
   "metrics": [
@@ -138,6 +156,60 @@ const appConfig = {
 };
 
 const today = new Date().toISOString().slice(0, 10);
+
+const REMINDER_STORAGE_KEY = 'hxwl-61303-reminder-settings';
+const DEFAULT_REMINDER_SETTINGS = {
+  '7天': 2,
+  '15天': 3,
+  '30天': 7
+};
+
+function loadReminderSettings() {
+  const raw = localStorage.getItem(REMINDER_STORAGE_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      return { ...DEFAULT_REMINDER_SETTINGS, ...parsed };
+    } catch {
+      return { ...DEFAULT_REMINDER_SETTINGS };
+    }
+  }
+  return { ...DEFAULT_REMINDER_SETTINGS };
+}
+
+function saveReminderSettings(settings) {
+  localStorage.setItem(REMINDER_STORAGE_KEY, JSON.stringify(settings));
+}
+
+function getReminderStatus(item, reminderSettings) {
+  if (!item.nextDate) return { type: 'none', label: '', daysLeft: null };
+  if (item.status === '已完成') return { type: 'none', label: '', daysLeft: null };
+
+  const date = new Date(item.nextDate);
+  const now = new Date(today);
+  const diff = Math.round((date.getTime() - now.getTime()) / 86400000);
+
+  if (diff < 0) {
+    return { type: 'overdue', label: '已逾期', daysLeft: diff };
+  } else if (diff === 0) {
+    return { type: 'today', label: '今日到期', daysLeft: 0 };
+  } else {
+    const advanceDays = reminderSettings[item.cycle] || 0;
+    if (diff <= advanceDays) {
+      return { type: 'soon', label: `即将到期（${diff}天）`, daysLeft: diff };
+    }
+  }
+  return { type: 'none', label: '', daysLeft: diff };
+}
+
+function reminderStatusClass(type) {
+  return {
+    overdue: 'reminder-overdue',
+    today: 'reminder-today',
+    soon: 'reminder-soon',
+    none: ''
+  }[type] || '';
+}
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -242,6 +314,11 @@ function App() {
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedOwner, setSelectedOwner] = useState(null);
   const [workbenchView, setWorkbenchView] = useState(false);
+  const [reminderSettings, setReminderSettings] = useState(loadReminderSettings);
+  const [showSettings, setShowSettings] = useState(false);
+  const [tempSettings, setTempSettings] = useState(loadReminderSettings);
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState({});
 
   function persist(next) {
     setRecords(next);
@@ -297,6 +374,50 @@ function App() {
     setSelected(copied);
   }
 
+  function startEdit(item) {
+    setEditForm({ ...item });
+    setEditing(true);
+  }
+
+  function cancelEdit() {
+    setEditing(false);
+    setEditForm({});
+  }
+
+  function saveEdit() {
+    if (!selected) return;
+    const next = records.map((item) => item.id === selected.id ? {
+      ...item,
+      ...editForm,
+      timeline: [...(item.timeline || []), { status: editForm.status || item.status, at: today, by: '编辑' }]
+    } : item);
+    persist(next);
+    const updated = next.find((item) => item.id === selected.id);
+    setSelected(updated);
+    setEditing(false);
+    setEditForm({});
+  }
+
+  function openSettings() {
+    setTempSettings({ ...reminderSettings });
+    setShowSettings(true);
+  }
+
+  function handleSaveSettings() {
+    const sanitized = {};
+    Object.keys(tempSettings).forEach((key) => {
+      const val = parseInt(tempSettings[key], 10);
+      sanitized[key] = Number.isFinite(val) && val >= 0 ? val : DEFAULT_REMINDER_SETTINGS[key];
+    });
+    setReminderSettings(sanitized);
+    saveReminderSettings(sanitized);
+    setShowSettings(false);
+  }
+
+  function handleResetSettings() {
+    setTempSettings({ ...DEFAULT_REMINDER_SETTINGS });
+  }
+
   function addTemperature(item) {
     const value = Number(prompt('录入新的温度读数'));
     if (!Number.isFinite(value)) return;
@@ -329,6 +450,10 @@ function App() {
     { label: "设备数", value: records.length },
     { label: "逾期", value: records.filter((item) => item.nextDate < today && item.status !== '已完成').length },
     { label: "今日", value: records.filter((item) => item.nextDate === today).length },
+    { label: "即将到期", value: records.filter((item) => {
+      const rs = getReminderStatus(item, reminderSettings);
+      return rs.type === 'soon';
+    }).length },
   ];
 
   const groupedByDate = useMemo(() => {
@@ -403,6 +528,10 @@ function App() {
           <p>{workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : appConfig.subtitle}</p>
         </div>
         <div className="hero-actions">
+          <button className="settings-btn" onClick={openSettings} title="维保提醒设置">
+            <Settings size={16} />
+            提醒设置
+          </button>
           <button className={'view-switch ' + (workbenchView ? '' : 'active')} onClick={() => { setWorkbenchView(false); setSelectedOwner(null); }}>
             <LayoutGrid size={16} />
             路线看板
@@ -413,6 +542,48 @@ function App() {
           </button>
         </div>
       </section>
+
+      {showSettings && (
+        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <Bell size={18} />
+                <h2>维保提醒设置</h2>
+              </div>
+              <button className="modal-close" onClick={() => setShowSettings(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p className="hint">为不同维保周期分别配置提前提醒天数，系统将在到期前自动标记「即将到期」。</p>
+            <div className="settings-form">
+              {Object.entries(DEFAULT_REMINDER_SETTINGS).map(([cycle, _]) => (
+                <label key={cycle} className="setting-item">
+                  <span className="setting-cycle">
+                    <Zap size={14} />
+                    {cycle}周期
+                  </span>
+                  <div className="setting-input-wrap">
+                    <input
+                      type="number"
+                      min="0"
+                      max="365"
+                      value={tempSettings[cycle] ?? ''}
+                      onChange={(e) => setTempSettings({ ...tempSettings, [cycle]: e.target.value })}
+                    />
+                    <span className="setting-unit">天</span>
+                  </div>
+                  <span className="setting-default">（默认：{DEFAULT_REMINDER_SETTINGS[cycle]}天）</span>
+                </label>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="secondary-btn" onClick={handleResetSettings}>恢复默认</button>
+              <button type="button" className="primary" onClick={handleSaveSettings}>保存设置</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="metrics">
         {metrics.map((metric) => (
@@ -477,8 +648,10 @@ function App() {
             {selectedOwner ? (
               selectedOwnerRecords.length ? (
                 <div className="owner-records">
-                  {selectedOwnerRecords.map((item) => (
-                    <div key={item.id} className="owner-record-item">
+                  {selectedOwnerRecords.map((item) => {
+                    const rs = getReminderStatus(item, reminderSettings);
+                    return (
+                    <div key={item.id} className={'owner-record-item ' + reminderStatusClass(rs.type)}>
                       <div className="owner-record-head">
                         <div>
                           <h4>{`${item.estate} ${item.building}`}</h4>
@@ -487,7 +660,15 @@ function App() {
                         <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                       </div>
                       <p className="record-detail">{`下次维保：${item.nextDate}`}</p>
-                      {item.nextDate < today && item.status !== '已完成' && (
+                      {rs.type !== 'none' && (
+                        <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
+                          {rs.type === 'overdue' && <AlertTriangle size={14} />}
+                          {rs.type === 'today' && <Zap size={14} />}
+                          {rs.type === 'soon' && <Bell size={14} />}
+                          {rs.label}
+                        </div>
+                      )}
+                      {rs.type === 'none' && item.nextDate < today && item.status !== '已完成' && (
                         <div className="warning"><AlertTriangle size={14} />已逾期</div>
                       )}
                       <div className="owner-record-actions">
@@ -496,7 +677,7 @@ function App() {
                         ))}
                       </div>
                     </div>
-                  ))}
+                  );})}
                 </div>
               ) : (
                 <p className="empty">暂无维保记录。</p>
@@ -553,8 +734,10 @@ function App() {
           </div>
 
           <div className="records">
-            {filteredRecords.map((item) => (
-              <article className={'record ' + (item.conflict || hasOverlap(item, records) ? 'conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
+            {filteredRecords.map((item) => {
+              const rs = getReminderStatus(item, reminderSettings);
+              return (
+              <article className={'record ' + (item.conflict || hasOverlap(item, records) ? 'conflict ' : '') + reminderStatusClass(rs.type)} key={item.id} onClick={() => setSelected(item)}>
                 <div className="record-head">
                   <div>
                     <h3>{`${item.estate} ${item.building}`}</h3>
@@ -563,6 +746,14 @@ function App() {
                   <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                 </div>
                 <p className="record-detail">{`下次维保：${item.nextDate}`}</p>
+                {rs.type !== 'none' && (
+                  <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
+                    {rs.type === 'overdue' && <AlertTriangle size={14} />}
+                    {rs.type === 'today' && <Zap size={14} />}
+                    {rs.type === 'soon' && <Bell size={14} />}
+                    {rs.label}
+                  </div>
+                )}
                 {(item.conflict || hasOverlap(item, records)) && <div className="warning"><AlertTriangle size={15} />发现冲突</div>}
                 <div className="actions" onClick={(event) => event.stopPropagation()}>
                   {appConfig.statuses.map((status) => (
@@ -573,7 +764,7 @@ function App() {
                   <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
                 </div>
               </article>
-            ))}
+            );})}
           </div>
         </section>
       </section>
@@ -620,15 +811,21 @@ function App() {
                         <span className="daynum">{new Date(date).getDate()}</span>
                       </div>
                       <div className="cell-items">
-                        {items.slice(0, 3).map((item) => (
-                          <div key={item.id} className={'cell-item ' + statusClass(item.status)} title={`${item.estate} ${item.building} · ${item.elevatorNo} · ${item.owner} · ${item.status}`}>
+                        {items.slice(0, 3).map((item) => {
+                          const rs = getReminderStatus(item, reminderSettings);
+                          return (
+                          <div key={item.id} className={'cell-item ' + statusClass(item.status) + ' ' + reminderStatusClass(rs.type)} title={`${item.estate} ${item.building} · ${item.elevatorNo} · ${item.owner} · ${item.status}${rs.label ? ' · ' + rs.label : ''}`}>
                             <span className="cell-item-estate">{item.estate}</span>
                             <span className="cell-item-no">{item.elevatorNo}</span>
                           </div>
-                        ))}
+                        );})}
                         {items.length > 3 && <div className="cell-more">+{items.length - 3}</div>}
                       </div>
                       {overdueCount > 0 && <div className="cell-overdue">逾期 {overdueCount}</div>}
+                      {(() => {
+                        const soonCount = items.filter((it) => getReminderStatus(it, reminderSettings).type === 'soon').length;
+                        return soonCount > 0 && overdueCount === 0 ? <div className="cell-soon">即将到期 {soonCount}</div> : null;
+                      })()}
                     </div>
                   );
                 })}
@@ -663,37 +860,120 @@ function App() {
           {selectedDate ? (
             selectedDateRecords.length ? (
               <div className="date-detail-list">
-                {selectedDateRecords.map((item) => (
-                  <div key={item.id} className="date-detail-item" onClick={() => setSelected(item)}>
+                {selectedDateRecords.map((item) => {
+                  const rs = getReminderStatus(item, reminderSettings);
+                  return (
+                  <div key={item.id} className={'date-detail-item ' + reminderStatusClass(rs.type)} onClick={() => setSelected(item)}>
                     <div className="date-detail-head">
                       <h3>{`${item.estate} ${item.building}`}</h3>
                       <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                     </div>
                     <p>{`${item.elevatorNo} · ${item.cycle} · ${item.owner}`}</p>
-                    {item.nextDate < today && item.status !== '已完成' && (
-                      <div className="warning"><AlertTriangle size={14} />已逾期</div>
+                    {rs.type !== 'none' && (
+                      <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
+                        {rs.type === 'overdue' && <AlertTriangle size={14} />}
+                        {rs.type === 'today' && <Zap size={14} />}
+                        {rs.type === 'soon' && <Bell size={14} />}
+                        {rs.label}
+                      </div>
                     )}
                   </div>
-                ))}
+                );})}
               </div>
             ) : (
               <p className="empty">{selectedDate} 暂无待处理设备。</p>
             )
           ) : selected ? (
             <div className="detail">
-              <h3>{`${selected.estate} ${selected.building}`}</h3>
-              <p>{`${selected.elevatorNo} · ${selected.cycle} · ${selected.owner}`}</p>
-              <p>{`下次维保：${selected.nextDate}`}</p>
-              {selected.temps && (
-                <div className="temp-chart">
-                  {selected.temps.map((value, index) => <i key={index} style={{ height: Math.max(10, 56 + Number(value) * 8) }} title={String(value)} />)}
-                </div>
+              {editing ? (
+                <>
+                  <div className="panel-title" style={{marginBottom: '12px'}}>
+                    <h2 style={{fontSize: '16px'}}>编辑设备信息</h2>
+                  </div>
+                  <div className="form-grid" style={{gridTemplateColumns: '1fr'}}>
+                    {appConfig.fields.map((field) => (
+                      <label key={field.key}>
+                        <span>{field.label}</span>
+                        {field.type === 'select' ? (
+                          <select
+                            value={editForm[field.key] || ''}
+                            onChange={(event) => setEditForm({ ...editForm, [field.key]: event.target.value })}
+                          >
+                            {field.options.map((option) => <option key={option}>{option}</option>)}
+                          </select>
+                        ) : (
+                          <input
+                            type={field.type}
+                            value={editForm[field.key] || ''}
+                            onChange={(event) => setEditForm({ ...editForm, [field.key]: event.target.value })}
+                            placeholder={field.placeholder}
+                          />
+                        )}
+                      </label>
+                    ))}
+                    <label>
+                      <span>当前状态</span>
+                      <select
+                        value={editForm.status || ''}
+                        onChange={(event) => setEditForm({ ...editForm, status: event.target.value })}
+                      >
+                        {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="modal-actions" style={{justifyContent: 'flex-start', marginTop: '16px'}}>
+                    <button type="button" className="primary" style={{width: 'auto', marginTop: 0, padding: '10px 20px'}} onClick={saveEdit}>保存</button>
+                    <button type="button" className="secondary-btn" onClick={cancelEdit}>取消</button>
+                  </div>
+                  <p className="hint">修改「下次维保日期」可以快速验证逾期、今日到期、即将到期三类状态的显示效果。</p>
+                </>
+              ) : (
+                <>
+                  <div className="detail-actions">
+                    <button className="edit-btn" type="button" onClick={() => startEdit(selected)}>
+                      <Settings size={14} />
+                      编辑
+                    </button>
+                  </div>
+                  <h3>{`${selected.estate} ${selected.building}`}</h3>
+                  <p>{`${selected.elevatorNo} · ${selected.cycle} · ${selected.owner}`}</p>
+                  <p>{`下次维保：${selected.nextDate}`}</p>
+                  {(() => {
+                    const rs = getReminderStatus(selected, reminderSettings);
+                    if (rs.type === 'none') return null;
+                    return (
+                      <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
+                        {rs.type === 'overdue' && <AlertTriangle size={14} />}
+                        {rs.type === 'today' && <Zap size={14} />}
+                        {rs.type === 'soon' && <Bell size={14} />}
+                        {rs.label}
+                      </div>
+                    );
+                  })()}
+                  <p className="reminder-explain">
+                    {(() => {
+                      const rs = getReminderStatus(selected, reminderSettings);
+                      const advanceDays = reminderSettings[selected.cycle] || 0;
+                      if (selected.status === '已完成') return '当前状态：已完成维保';
+                      if (rs.daysLeft === null) return '';
+                      if (rs.type === 'overdue') return `已逾期 ${Math.abs(rs.daysLeft)} 天，请尽快安排维保`;
+                      if (rs.type === 'today') return `今天是维保日期，请按计划执行`;
+                      if (rs.type === 'soon') return `距离维保还有 ${rs.daysLeft} 天（${selected.cycle}周期配置提前${advanceDays}天提醒）`;
+                      return `距离维保还有 ${rs.daysLeft} 天，当前周期配置提前 ${advanceDays} 天提醒`;
+                    })()}
+                  </p>
+                  {selected.temps && (
+                    <div className="temp-chart">
+                      {selected.temps.map((value, index) => <i key={index} style={{ height: Math.max(10, 56 + Number(value) * 8) }} title={String(value)} />)}
+                    </div>
+                  )}
+                  <div className="timeline">
+                    {(selected.timeline || []).map((step, index) => (
+                      <span key={index}>{step.at} · {step.status} · {step.by}</span>
+                    ))}
+                  </div>
+                </>
               )}
-              <div className="timeline">
-                {(selected.timeline || []).map((step, index) => (
-                  <span key={index}>{step.at} · {step.status} · {step.by}</span>
-                ))}
-              </div>
             </div>
           ) : (
             <p className="empty">点击任意记录查看详情和状态流转，或切换到日历视图点击某日查看当天待处理设备。</p>
