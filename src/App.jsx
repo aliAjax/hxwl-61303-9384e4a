@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays } from 'lucide-react';
+import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -201,11 +201,45 @@ function statusClass(status) {
   return ['status-a', 'status-b', 'status-c', 'status-d'][index] || 'status-a';
 }
 
+function formatDate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getWeekDates(offset = 0) {
+  const now = new Date(today);
+  const day = now.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(now);
+  monday.setDate(now.getDate() + diffToMonday + offset * 7);
+  const dates = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    dates.push(formatDate(d));
+  }
+  return dates;
+}
+
+function getWeekLabel(offset = 0) {
+  const dates = getWeekDates(offset);
+  const start = new Date(dates[0]);
+  const end = new Date(dates[6]);
+  return `${start.getMonth() + 1}月${start.getDate()}日 - ${end.getMonth() + 1}月${end.getDate()}日`;
+}
+
+const weekdayLabels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
 function App() {
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
   const [filters, setFilters] = useState({ query: '', status: '全部' });
   const [selected, setSelected] = useState(null);
+  const [viewMode, setViewMode] = useState('group');
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [selectedDate, setSelectedDate] = useState(null);
 
   function persist(next) {
     setRecords(next);
@@ -311,6 +345,23 @@ function App() {
     }, {});
   }, [records]);
 
+  const weekDates = useMemo(() => getWeekDates(weekOffset), [weekOffset]);
+
+  const calendarByDate = useMemo(() => {
+    const map = {};
+    weekDates.forEach((d) => (map[d] = []));
+    filteredRecords.forEach((item) => {
+      const d = item.nextDate;
+      if (d && map[d]) map[d].push(item);
+    });
+    return map;
+  }, [filteredRecords, weekDates]);
+
+  const selectedDateRecords = useMemo(() => {
+    if (!selectedDate) return [];
+    return filteredRecords.filter((item) => item.nextDate === selectedDate);
+  }, [filteredRecords, selectedDate]);
+
   return (
     <main className="shell" style={{ '--accent': appConfig.accent }}>
       <section className="hero">
@@ -406,11 +457,61 @@ function App() {
 
       <section className="insights">
         <div className="panel">
-          <div className="panel-title">
-            <CalendarDays size={18} />
-            <h2>{appConfig.directory ? '证据目录预览' : appConfig.board ? '床位看板' : '分组视图'}</h2>
+          <div className="panel-title-with-actions">
+            <div className="panel-title">
+              <CalendarDays size={18} />
+              <h2>{viewMode === 'calendar' ? '路线日历' : (appConfig.directory ? '证据目录预览' : appConfig.board ? '床位看板' : '分组视图')}</h2>
+            </div>
+            <div className="view-toggle">
+              <button className={'toggle-btn ' + (viewMode === 'group' ? 'active' : '')} onClick={() => setViewMode('group')} title="分组视图">
+                <LayoutGrid size={15} />
+              </button>
+              <button className={'toggle-btn ' + (viewMode === 'calendar' ? 'active' : '')} onClick={() => { setViewMode('calendar'); setSelectedDate(null); }} title="路线日历">
+                <Calendar size={15} />
+              </button>
+            </div>
           </div>
-          {appConfig.directory ? (
+
+          {viewMode === 'calendar' ? (
+            <div className="calendar-view">
+              <div className="calendar-header">
+                <button className="week-nav" onClick={() => setWeekOffset(weekOffset - 1)}><ChevronLeft size={16} /></button>
+                <span className="week-label">{getWeekLabel(weekOffset)}</span>
+                <button className="week-nav" onClick={() => setWeekOffset(weekOffset + 1)}><ChevronRight size={16} /></button>
+                <button className="week-today" onClick={() => setWeekOffset(0)}>本周</button>
+              </div>
+              <div className="calendar-grid">
+                {weekDates.map((date, idx) => {
+                  const items = calendarByDate[date] || [];
+                  const isTodayCell = date === today;
+                  const isSelected = date === selectedDate;
+                  const overdueCount = items.filter((it) => it.nextDate < today && it.status !== '已完成').length;
+                  return (
+                    <div
+                      key={date}
+                      className={'calendar-cell ' + (isTodayCell ? 'today ' : '') + (isSelected ? 'selected ' : '') + (items.length ? 'has-items' : '')}
+                      onClick={() => setSelectedDate(isSelected ? null : date)}
+                    >
+                      <div className="cell-head">
+                        <span className="weekday">{weekdayLabels[idx]}</span>
+                        <span className="daynum">{new Date(date).getDate()}</span>
+                      </div>
+                      <div className="cell-items">
+                        {items.slice(0, 3).map((item) => (
+                          <div key={item.id} className={'cell-item ' + statusClass(item.status)} title={`${item.estate} ${item.building} · ${item.elevatorNo} · ${item.owner} · ${item.status}`}>
+                            <span className="cell-item-estate">{item.estate}</span>
+                            <span className="cell-item-no">{item.elevatorNo}</span>
+                          </div>
+                        ))}
+                        {items.length > 3 && <div className="cell-more">+{items.length - 3}</div>}
+                      </div>
+                      {overdueCount > 0 && <div className="cell-overdue">逾期 {overdueCount}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : appConfig.directory ? (
             <div className="directory">
               {Object.entries(directory).map(([issue, items]) => (
                 <div key={issue} className="directory-group">
@@ -434,9 +535,28 @@ function App() {
         <aside className="panel detail-panel">
           <div className="panel-title">
             <CheckCircle2 size={18} />
-            <h2>详情</h2>
+            <h2>{selectedDate ? `${selectedDate} 待处理设备` : (selected ? '详情' : '详情')}</h2>
           </div>
-          {selected ? (
+          {selectedDate ? (
+            selectedDateRecords.length ? (
+              <div className="date-detail-list">
+                {selectedDateRecords.map((item) => (
+                  <div key={item.id} className="date-detail-item" onClick={() => setSelected(item)}>
+                    <div className="date-detail-head">
+                      <h3>{`${item.estate} ${item.building}`}</h3>
+                      <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                    </div>
+                    <p>{`${item.elevatorNo} · ${item.cycle} · ${item.owner}`}</p>
+                    {item.nextDate < today && item.status !== '已完成' && (
+                      <div className="warning"><AlertTriangle size={14} />已逾期</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="empty">{selectedDate} 暂无待处理设备。</p>
+            )
+          ) : selected ? (
             <div className="detail">
               <h3>{`${selected.estate} ${selected.building}`}</h3>
               <p>{`${selected.elevatorNo} · ${selected.cycle} · ${selected.owner}`}</p>
@@ -453,7 +573,7 @@ function App() {
               </div>
             </div>
           ) : (
-            <p className="empty">点击任意记录查看详情和状态流转。</p>
+            <p className="empty">点击任意记录查看详情和状态流转，或切换到日历视图点击某日查看当天待处理设备。</p>
           )}
         </aside>
       </section>
