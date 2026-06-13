@@ -423,7 +423,7 @@ function App() {
       owner: record.owner,
       status: appConfig.primaryStatus,
       createdAt: new Date().toISOString(),
-      timeline: [{ status: appConfig.primaryStatus, at: today, by: '批量导入' }]
+      timeline: [{ status: appConfig.primaryStatus, at: today, by: '录入' }]
     }));
 
     persist([...newRecords, ...records]);
