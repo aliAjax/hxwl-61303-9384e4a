@@ -91,6 +91,82 @@ h1 { font-size: 34px; line-height: 1.15; letter-spacing: 0; }
 
 label { display: grid; gap: 6px; color: #344054; font-size: 13px; font-weight: 700; }
 label.wide { grid-column: 1 / -1; }
+
+.autocomplete-wrapper {
+  position: relative;
+  display: grid;
+  gap: 6px;
+}
+
+.autocomplete-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: #fff;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.autocomplete-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background-color 0.12s;
+  border-bottom: 1px solid #f2f4f7;
+}
+
+.autocomplete-item:last-child {
+  border-bottom: none;
+}
+
+.autocomplete-item:hover {
+  background: #f8fafc;
+}
+
+.autocomplete-item.is-estate-owner {
+  background: #eff6ff;
+}
+
+.autocomplete-item.is-estate-owner:hover {
+  background: #dbeafe;
+}
+
+.autocomplete-item-icon {
+  color: #6b7280;
+  flex-shrink: 0;
+}
+
+.autocomplete-item span {
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.autocomplete-item-meta {
+  margin-left: auto;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: #6b7280 !important;
+}
+
+.autocomplete-item-tag {
+  margin-left: auto;
+  background: var(--accent);
+  color: #fff !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
 input, select, textarea {
   width: 100%;
   border: 1px solid #d0d5dd;

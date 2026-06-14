@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown, ShieldAlert, AlertOctagon, Clock, UserX, Building, Download, HardDrive, Database, RefreshCw, FileJson } from 'lucide-react';
 import './App.css';
 
@@ -1127,6 +1127,144 @@ function App() {
   const [expandedPlanDates, setExpandedPlanDates] = useState({});
   const [planEditItem, setPlanEditItem] = useState(null);
   const [planEditForm, setPlanEditForm] = useState({ date: '', owner: '' });
+  const [showEstateSuggestions, setShowEstateSuggestions] = useState(false);
+  const [showOwnerSuggestions, setShowOwnerSuggestions] = useState(false);
+  const [estateInputValue, setEstateInputValue] = useState('');
+  const [ownerInputValue, setOwnerInputValue] = useState('');
+
+  const estateMetadata = useMemo(() => {
+    const meta = {};
+    records.forEach((record) => {
+      const estate = record.estate;
+      if (!estate) return;
+      if (!meta[estate]) {
+        meta[estate] = {
+          estate,
+          ownerCounts: {},
+          cycleCounts: {},
+          ownerHistory: [],
+          cycleHistory: [],
+          lastUsedAt: record.updatedAt || record.createdAt || ''
+        };
+      }
+      const owner = record.owner || '';
+      const cycle = record.cycle || '';
+      meta[estate].ownerCounts[owner] = (meta[estate].ownerCounts[owner] || 0) + 1;
+      meta[estate].cycleCounts[cycle] = (meta[estate].cycleCounts[cycle] || 0) + 1;
+      const recordDate = record.updatedAt || record.createdAt || '';
+      if (recordDate > meta[estate].lastUsedAt) {
+        meta[estate].lastUsedAt = recordDate;
+      }
+      if (!meta[estate].ownerHistory.some(h => h.owner === owner)) {
+        meta[estate].ownerHistory.push({ owner, at: recordDate });
+      }
+      if (!meta[estate].cycleHistory.some(h => h.cycle === cycle)) {
+        meta[estate].cycleHistory.push({ cycle, at: recordDate });
+      }
+    });
+    return meta;
+  }, [records]);
+
+  const uniqueEstates = useMemo(() => {
+    return Object.values(estateMetadata)
+      .sort((a, b) => {
+        if (a.lastUsedAt && b.lastUsedAt) {
+          return b.lastUsedAt.localeCompare(a.lastUsedAt);
+        }
+        return a.estate.localeCompare(b.estate);
+      })
+      .map(m => m.estate);
+  }, [estateMetadata]);
+
+  const uniqueOwners = useMemo(() => {
+    const ownerCounts = {};
+    records.forEach((record) => {
+      const owner = record.owner;
+      if (owner) {
+        ownerCounts[owner] = (ownerCounts[owner] || 0) + 1;
+      }
+    });
+    return Object.entries(ownerCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([owner]) => owner);
+  }, [records]);
+
+  const filteredEstateSuggestions = useMemo(() => {
+    if (!estateInputValue.trim()) return uniqueEstates;
+    const query = estateInputValue.toLowerCase();
+    return uniqueEstates.filter(estate => 
+      estate.toLowerCase().includes(query)
+    );
+  }, [estateInputValue, uniqueEstates]);
+
+  const filteredOwnerSuggestions = useMemo(() => {
+    if (!ownerInputValue.trim()) {
+      if (form.estate && estateMetadata[form.estate]) {
+        const estateMeta = estateMetadata[form.estate];
+        const estateOwners = Object.entries(estateMeta.ownerCounts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([owner]) => owner)
+          .filter(Boolean);
+        const otherOwners = uniqueOwners.filter(o => !estateOwners.includes(o));
+        return [...estateOwners, ...otherOwners];
+      }
+      return uniqueOwners;
+    }
+    const query = ownerInputValue.toLowerCase();
+    return uniqueOwners.filter(owner => 
+      owner.toLowerCase().includes(query)
+    );
+  }, [ownerInputValue, uniqueOwners, form.estate, estateMetadata]);
+
+  function getEstateDefaults(estateName) {
+    const meta = estateMetadata[estateName];
+    if (!meta) return { owner: '', cycle: '' };
+    
+    const topOwner = Object.entries(meta.ownerCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([owner]) => owner)[0] || '';
+    
+    const topCycle = Object.entries(meta.cycleCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([cycle]) => cycle)[0] || '';
+    
+    return { owner: topOwner, cycle: topCycle };
+  }
+
+  function handleEstateSelect(estateName) {
+    const defaults = getEstateDefaults(estateName);
+    setForm(prev => ({
+      ...prev,
+      estate: estateName,
+      owner: defaults.owner || prev.owner,
+      cycle: defaults.cycle || prev.cycle
+    }));
+    setEstateInputValue(estateName);
+    setShowEstateSuggestions(false);
+  }
+
+  function handleOwnerSelect(ownerName) {
+    setForm(prev => ({ ...prev, owner: ownerName }));
+    setOwnerInputValue(ownerName);
+    setShowOwnerSuggestions(false);
+  }
+
+  function closeSuggestionsOnClick(e) {
+    if (!e.target.closest('.autocomplete-wrapper')) {
+      setShowEstateSuggestions(false);
+      setShowOwnerSuggestions(false);
+    }
+  }
+
+  useEffect(() => {
+    document.addEventListener('click', closeSuggestionsOnClick);
+    return () => document.removeEventListener('click', closeSuggestionsOnClick);
+  }, []);
+
+  useEffect(() => {
+    setEstateInputValue(form.estate || '');
+    setOwnerInputValue(form.owner || '');
+  }, [form.estate, form.owner]);
 
   function computeNextDate(baseDate, cycle) {
     const match = cycle && cycle.match(/(\d+)/);
@@ -1378,7 +1516,14 @@ function App() {
     }
 
     persist([nextRecord, ...records]);
-    setForm(appConfig.defaultValues);
+    setForm({
+      ...appConfig.defaultValues,
+      estate: form.estate,
+      owner: form.owner,
+      cycle: form.cycle
+    });
+    setEstateInputValue(form.estate);
+    setOwnerInputValue(form.owner);
     setSelected(nextRecord);
   }
 
@@ -4835,20 +4980,101 @@ function App() {
             <h2>新增记录</h2>
           </div>
           <div className="form-grid">
-            {appConfig.fields.map((field) => (
-              <label key={field.key} className={field.type === 'textarea' ? 'wide' : ''}>
-                <span>{field.label}</span>
-                {field.type === 'textarea' ? (
-                  <textarea value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
-                ) : field.type === 'select' ? (
-                  <select value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}>
-                    {field.options.map((option) => <option key={option}>{option}</option>)}
-                  </select>
-                ) : (
-                  <input type={field.type} value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
-                )}
-              </label>
-            ))}
+            {appConfig.fields.map((field) => {
+              if (field.key === 'estate') {
+                return (
+                  <label key={field.key} className="autocomplete-wrapper">
+                    <span>{field.label}</span>
+                    <input
+                      type="text"
+                      value={estateInputValue}
+                      onChange={(e) => {
+                        setEstateInputValue(e.target.value);
+                        setForm({ ...form, estate: e.target.value });
+                        setShowEstateSuggestions(true);
+                      }}
+                      onFocus={() => setShowEstateSuggestions(true)}
+                      onClick={(e) => { e.stopPropagation(); setShowEstateSuggestions(true); }}
+                      placeholder={field.placeholder}
+                      autoComplete="off"
+                    />
+                    {showEstateSuggestions && filteredEstateSuggestions.length > 0 && (
+                      <div className="autocomplete-dropdown">
+                        {filteredEstateSuggestions.map((estate) => (
+                          <div
+                            key={estate}
+                            className="autocomplete-item"
+                            onClick={(e) => { e.stopPropagation(); handleEstateSelect(estate); }}
+                          >
+                            <Building size={14} className="autocomplete-item-icon" />
+                            <span>{estate}</span>
+                            {estateMetadata[estate] && (
+                              <span className="autocomplete-item-meta">
+                                {Object.keys(estateMetadata[estate].ownerCounts).length}位负责人 · {Object.keys(estateMetadata[estate].cycleCounts).length}种周期
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </label>
+                );
+              }
+              if (field.key === 'owner') {
+                return (
+                  <label key={field.key} className="autocomplete-wrapper">
+                    <span>{field.label}</span>
+                    <input
+                      type="text"
+                      value={ownerInputValue}
+                      onChange={(e) => {
+                        setOwnerInputValue(e.target.value);
+                        setForm({ ...form, owner: e.target.value });
+                        setShowOwnerSuggestions(true);
+                      }}
+                      onFocus={() => setShowOwnerSuggestions(true)}
+                      onClick={(e) => { e.stopPropagation(); setShowOwnerSuggestions(true); }}
+                      placeholder={field.placeholder}
+                      autoComplete="off"
+                    />
+                    {showOwnerSuggestions && filteredOwnerSuggestions.length > 0 && (
+                      <div className="autocomplete-dropdown">
+                        {filteredOwnerSuggestions.map((owner) => {
+                          const isEstateOwner = form.estate && estateMetadata[form.estate]?.ownerCounts[owner];
+                          return (
+                            <div
+                              key={owner}
+                              className={'autocomplete-item ' + (isEstateOwner ? 'is-estate-owner' : '')}
+                              onClick={(e) => { e.stopPropagation(); handleOwnerSelect(owner); }}
+                            >
+                              <User size={14} className="autocomplete-item-icon" />
+                              <span>{owner}</span>
+                              {isEstateOwner && (
+                                <span className="autocomplete-item-tag">常用</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </label>
+                );
+              }
+              return (
+                <label key={field.key} className={field.type === 'textarea' ? 'wide' : ''}>
+                  <span>{field.label}</span>
+                  {field.type === 'textarea' ? (
+                    <textarea value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
+                  ) : field.type === 'select' ? (
+                    <select value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}>
+                      {field.options.map((option) => <option key={option}>{option}</option>)}
+                    </select>
+                  ) : (
+                    <input type={field.type} value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
+                  )}
+                </label>
+              );
+            })}
             <label>
               <span>当前状态</span>
               <select value={form.status || appConfig.primaryStatus} onChange={(event) => setForm({ ...form, status: event.target.value })}>
