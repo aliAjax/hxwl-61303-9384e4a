@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown, ShieldAlert, AlertOctagon, Clock, UserX, Building } from 'lucide-react';
+import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown, ShieldAlert, AlertOctagon, Clock, UserX, Building, Download, HardDrive, Database, RefreshCw, FileJson } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -179,6 +179,8 @@ const DEFAULT_REMINDER_SETTINGS = {
 };
 
 const ROUTE_PLANS_STORAGE_KEY = 'hxwl-61303-route-plans';
+const DATA_EXPORT_VERSION = '1.0.0';
+const DATA_EXPORT_APP_ID = 'hxwl-61303-elevator-maintenance';
 
 function getNextDays(count) {
   const dates = [];
@@ -284,6 +286,102 @@ function loadRecords() {
   return withIds(appConfig.seed);
 }
 
+function buildExportData(records, reminderSettings, routePlans) {
+  return {
+    appId: DATA_EXPORT_APP_ID,
+    version: DATA_EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    data: {
+      records,
+      reminderSettings,
+      routePlans
+    }
+  };
+}
+
+function validateImportData(parsed) {
+  const errors = [];
+  const warnings = [];
+
+  if (!parsed || typeof parsed !== 'object') {
+    errors.push('文件格式错误：不是有效的JSON对象');
+    return { valid: false, errors, warnings, summary: null };
+  }
+
+  if (!parsed.appId) {
+    errors.push('文件格式错误：缺少 appId 标识，可能不是本系统导出的文件');
+  } else if (parsed.appId !== DATA_EXPORT_APP_ID) {
+    errors.push(`文件来源不匹配：期望 ${DATA_EXPORT_APP_ID}，实际为 ${parsed.appId}`);
+  }
+
+  if (!parsed.version) {
+    warnings.push('缺少版本信息，可能存在兼容性风险');
+  } else if (parsed.version !== DATA_EXPORT_VERSION) {
+    warnings.push(`版本不一致：当前系统 v${DATA_EXPORT_VERSION}，导入文件 v${parsed.version}，部分字段可能不兼容`);
+  }
+
+  if (!parsed.data || typeof parsed.data !== 'object') {
+    errors.push('文件结构错误：缺少 data 节点');
+    return { valid: false, errors, warnings, summary: null };
+  }
+
+  const { data } = parsed;
+
+  if (!Array.isArray(data.records)) {
+    errors.push('字段缺失：records 应为数组');
+  }
+
+  if (!data.reminderSettings || typeof data.reminderSettings !== 'object') {
+    errors.push('字段缺失：reminderSettings 应为对象');
+  }
+
+  if (!data.routePlans || typeof data.routePlans !== 'object') {
+    errors.push('字段缺失：routePlans 应为对象');
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors, warnings, summary: null };
+  }
+
+  const summary = computeDataSummary(data.records);
+  return { valid: true, errors, warnings, summary, data };
+}
+
+function computeDataSummary(records) {
+  const recordCount = records.length;
+  const owners = new Set();
+  let earliestDate = null;
+  let latestDate = null;
+
+  records.forEach((item) => {
+    if (item.owner) owners.add(item.owner);
+    if (item.nextDate) {
+      if (!earliestDate || item.nextDate < earliestDate) earliestDate = item.nextDate;
+      if (!latestDate || item.nextDate > latestDate) latestDate = item.nextDate;
+    }
+  });
+
+  return {
+    recordCount,
+    ownerCount: owners.size,
+    earliestDate,
+    latestDate
+  };
+}
+
+function downloadJSON(data, filename) {
+  const jsonStr = JSON.stringify(data, null, 2);
+  const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function avg(numbers) {
   const valid = numbers.filter((value) => Number.isFinite(value));
   if (!valid.length) return 0;
@@ -384,6 +482,13 @@ function App() {
   const [backfillForm, setBackfillForm] = useState({ completedAt: '', executor: '', notes: '', nextDate: '' });
   const [riskDashboardView, setRiskDashboardView] = useState(false);
   const [expandedRisks, setExpandedRisks] = useState({});
+  const [showDataManager, setShowDataManager] = useState(false);
+  const [dataManagerTab, setDataManagerTab] = useState('export');
+  const [importFile, setImportFile] = useState(null);
+  const [importFileName, setImportFileName] = useState('');
+  const [importValidation, setImportValidation] = useState(null);
+  const [importConfirmStep, setImportConfirmStep] = useState(false);
+  const fileInputRef = useRef(null);
 
   function computeNextDate(baseDate, cycle) {
     const match = cycle && cycle.match(/(\d+)/);
@@ -647,6 +752,82 @@ function App() {
 
   function handleResetSettings() {
     setTempSettings({ ...DEFAULT_REMINDER_SETTINGS });
+  }
+
+  function handleExportData() {
+    const exportData = buildExportData(records, reminderSettings, routePlans);
+    const dateStr = formatDate(new Date());
+    const filename = `电梯维保数据_${dateStr}.json`;
+    downloadJSON(exportData, filename);
+  }
+
+  function handleSelectFileClick() {
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  }
+
+  function handleFileChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportFile(file);
+    setImportFileName(file.name);
+    setImportValidation(null);
+    setImportConfirmStep(false);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result;
+        if (typeof text !== 'string') {
+          setImportValidation({ valid: false, errors: ['文件读取失败'], warnings: [], summary: null });
+          return;
+        }
+        const parsed = JSON.parse(text);
+        const result = validateImportData(parsed);
+        setImportValidation(result);
+      } catch (err) {
+        setImportValidation({
+          valid: false,
+          errors: ['JSON解析失败：文件格式错误，请确保是有效的JSON文件'],
+          warnings: [],
+          summary: null
+        });
+      }
+    };
+    reader.onerror = () => {
+      setImportValidation({ valid: false, errors: ['文件读取失败'], warnings: [], summary: null });
+    };
+    reader.readAsText(file);
+
+    e.target.value = '';
+  }
+
+  function resetImportState() {
+    setImportFile(null);
+    setImportFileName('');
+    setImportValidation(null);
+    setImportConfirmStep(false);
+  }
+
+  function closeDataManager() {
+    setShowDataManager(false);
+    resetImportState();
+  }
+
+  function handleConfirmRestore() {
+    if (!importValidation?.valid || !importValidation.data) return;
+    const { records: newRecords, reminderSettings: newReminderSettings, routePlans: newRoutePlans } = importValidation.data;
+
+    persist(newRecords);
+    setReminderSettings(newReminderSettings);
+    saveReminderSettings(newReminderSettings);
+    setRoutePlans(newRoutePlans);
+    saveRoutePlans(newRoutePlans);
+
+    setSelected(null);
+    alert('数据恢复成功！');
+    closeDataManager();
   }
 
   function addTemperature(item) {
@@ -1014,6 +1195,10 @@ function App() {
           <p>{routePlanningView ? '按楼盘聚合待维保设备，灵活编排每日维保路线并保存方案' : (workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : (riskDashboardView ? '汇总逾期、到期、过载与集中到期风险，点击展开查看相关记录' : appConfig.subtitle))}</p>
         </div>
         <div className="hero-actions">
+          <button className="settings-btn" onClick={() => setShowDataManager(true)} title="数据导出与恢复">
+            <HardDrive size={16} />
+            数据管理
+          </button>
           <button className="settings-btn" onClick={openSettings} title="维保提醒设置">
             <Settings size={16} />
             提醒设置
@@ -1147,6 +1332,213 @@ function App() {
               <button type="button" className="secondary-btn" onClick={handleResetSettings}>恢复默认</button>
               <button type="button" className="primary" onClick={handleSaveSettings}>保存设置</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showDataManager && (
+        <div className="modal-overlay" onClick={closeDataManager}>
+          <div className="modal-panel data-manager-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <HardDrive size={18} />
+                <h2>数据导出与恢复</h2>
+              </div>
+              <button className="modal-close" onClick={closeDataManager}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="dm-tabs">
+              <button
+                className={'dm-tab ' + (dataManagerTab === 'export' ? 'active' : '')}
+                onClick={() => { setDataManagerTab('export'); resetImportState(); }}
+              >
+                <Download size={16} />
+                数据导出
+              </button>
+              <button
+                className={'dm-tab ' + (dataManagerTab === 'import' ? 'active' : '')}
+                onClick={() => setDataManagerTab('import')}
+              >
+                <RefreshCw size={16} />
+                数据恢复
+              </button>
+            </div>
+
+            {dataManagerTab === 'export' && (
+              <div className="dm-content">
+                <p className="hint">将当前所有电梯维保记录、提醒配置和路线方案打包导出为JSON文件，用于备份或迁移。</p>
+                <div className="dm-summary-grid">
+                  <div className="dm-summary-card">
+                    <Database size={28} />
+                    <div>
+                      <span className="dm-summary-label">维保记录</span>
+                      <strong className="dm-summary-value">{records.length} 条</strong>
+                    </div>
+                  </div>
+                  <div className="dm-summary-card">
+                    <Users size={28} />
+                    <div>
+                      <span className="dm-summary-label">负责人数量</span>
+                      <strong className="dm-summary-value">{new Set(records.map(r => r.owner).filter(Boolean)).size} 人</strong>
+                    </div>
+                  </div>
+                  <div className="dm-summary-card">
+                    <Bell size={28} />
+                    <div>
+                      <span className="dm-summary-label">提醒配置</span>
+                      <strong className="dm-summary-value">{Object.keys(reminderSettings).length} 项</strong>
+                    </div>
+                  </div>
+                  <div className="dm-summary-card">
+                    <Route size={28} />
+                    <div>
+                      <span className="dm-summary-label">路线方案</span>
+                      <strong className="dm-summary-value">{Object.keys(routePlans).length} 天</strong>
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="secondary-btn" onClick={closeDataManager}>取消</button>
+                  <button type="button" className="primary" onClick={handleExportData}>
+                    <Download size={16} />
+                    导出JSON文件
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {dataManagerTab === 'import' && !importConfirmStep && (
+              <div className="dm-content">
+                <p className="hint">选择之前导出的JSON文件，系统将验证文件格式和版本，并展示数据摘要供确认。</p>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                  onChange={handleFileChange}
+                />
+
+                <div className={'dm-dropzone ' + (importFile ? 'has-file' : '')} onClick={handleSelectFileClick}>
+                  <FileJson size={42} />
+                  {importFileName ? (
+                    <>
+                      <strong className="dm-filename">{importFileName}</strong>
+                      <span className="dm-filehint">点击重新选择文件</span>
+                    </>
+                  ) : (
+                    <>
+                      <strong>点击选择JSON文件</strong>
+                      <span className="dm-filehint">或拖拽文件到此处（仅支持 .json 格式）</span>
+                    </>
+                  )}
+                </div>
+
+                {importValidation && !importValidation.valid && (
+                  <div className="dm-errors">
+                    <div className="dm-section-title">
+                      <XCircle size={16} />
+                      验证失败
+                    </div>
+                    {importValidation.errors.map((err, idx) => (
+                      <div key={idx} className="dm-error-item">
+                        <AlertTriangle size={14} />
+                        {err}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {importValidation && importValidation.valid && (
+                  <div className="dm-validation-ok">
+                    <div className="dm-section-title">
+                      <CheckCircle2 size={16} />
+                      文件验证通过
+                    </div>
+
+                    {importValidation.warnings.length > 0 && (
+                      <div className="dm-warnings">
+                        {importValidation.warnings.map((warn, idx) => (
+                          <div key={idx} className="dm-warning-item">
+                            <AlertTriangle size={14} />
+                            {warn}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="dm-preview-title">
+                      <Database size={16} />
+                      数据摘要
+                    </div>
+                    <div className="dm-preview-grid">
+                      <div className="dm-preview-item">
+                        <span className="dm-preview-label">维保记录数</span>
+                        <strong className="dm-preview-value">{importValidation.summary.recordCount} 条</strong>
+                      </div>
+                      <div className="dm-preview-item">
+                        <span className="dm-preview-label">负责人数量</span>
+                        <strong className="dm-preview-value">{importValidation.summary.ownerCount} 人</strong>
+                      </div>
+                      <div className="dm-preview-item">
+                        <span className="dm-preview-label">最早维保日期</span>
+                        <strong className="dm-preview-value">{importValidation.summary.earliestDate || '—'}</strong>
+                      </div>
+                      <div className="dm-preview-item">
+                        <span className="dm-preview-label">最晚维保日期</span>
+                        <strong className="dm-preview-value">{importValidation.summary.latestDate || '—'}</strong>
+                      </div>
+                    </div>
+
+                    <div className="dm-overwrite-warn">
+                      <ShieldAlert size={20} />
+                      <div>
+                        <strong>数据覆盖警告</strong>
+                        <p>恢复操作将<strong>完全覆盖</strong>当前本地的所有维保记录、提醒配置和路线方案，此操作不可撤销。建议先导出当前数据进行备份。</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="modal-actions">
+                  <button type="button" className="secondary-btn" onClick={closeDataManager}>取消</button>
+                  <button
+                    type="button"
+                    className="primary danger"
+                    onClick={() => setImportConfirmStep(true)}
+                    disabled={!importValidation?.valid}
+                  >
+                    <RefreshCw size={16} />
+                    开始恢复
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {dataManagerTab === 'import' && importConfirmStep && (
+              <div className="dm-content">
+                <div className="dm-confirm-box">
+                  <AlertOctagon size={48} />
+                  <h3>最终确认：是否恢复数据？</h3>
+                  <p>您即将从 <strong>{importFileName}</strong> 恢复以下数据：</p>
+                  <ul className="dm-confirm-list">
+                    <li>维保记录：<strong>{importValidation?.summary.recordCount} 条</strong></li>
+                    <li>负责人：<strong>{importValidation?.summary.ownerCount} 人</strong></li>
+                    <li>维保日期范围：<strong>{importValidation?.summary.earliestDate || '—'}</strong> 至 <strong>{importValidation?.summary.latestDate || '—'}</strong></li>
+                  </ul>
+                  <p className="dm-final-warn">⚠️ 当前所有本地数据将被永久覆盖，无法撤销！</p>
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="secondary-btn" onClick={() => setImportConfirmStep(false)}>返回修改</button>
+                  <button type="button" className="primary danger" onClick={handleConfirmRestore}>
+                    <CheckCircle2 size={16} />
+                    确认恢复并覆盖
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
