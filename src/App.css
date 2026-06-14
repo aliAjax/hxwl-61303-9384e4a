@@ -152,9 +152,14 @@ label.wide { grid-column: 1 / -1; }
 
 .autocomplete-item-meta {
   margin-left: auto;
-  font-size: 12px !important;
+  font-size: 11px !important;
   font-weight: 500 !important;
   color: #6b7280 !important;
+  white-space: nowrap;
+  text-align: right;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .autocomplete-item-tag {

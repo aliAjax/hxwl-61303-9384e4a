@@ -1142,24 +1142,27 @@ function App() {
           estate,
           ownerCounts: {},
           cycleCounts: {},
-          ownerHistory: [],
-          cycleHistory: [],
+          ownerLastUsed: {},
+          cycleLastUsed: {},
           lastUsedAt: record.updatedAt || record.createdAt || ''
         };
       }
       const owner = record.owner || '';
       const cycle = record.cycle || '';
+      const recordDate = record.updatedAt || record.createdAt || '';
+      
       meta[estate].ownerCounts[owner] = (meta[estate].ownerCounts[owner] || 0) + 1;
       meta[estate].cycleCounts[cycle] = (meta[estate].cycleCounts[cycle] || 0) + 1;
-      const recordDate = record.updatedAt || record.createdAt || '';
+      
+      if (!meta[estate].ownerLastUsed[owner] || recordDate > meta[estate].ownerLastUsed[owner]) {
+        meta[estate].ownerLastUsed[owner] = recordDate;
+      }
+      if (!meta[estate].cycleLastUsed[cycle] || recordDate > meta[estate].cycleLastUsed[cycle]) {
+        meta[estate].cycleLastUsed[cycle] = recordDate;
+      }
+      
       if (recordDate > meta[estate].lastUsedAt) {
         meta[estate].lastUsedAt = recordDate;
-      }
-      if (!meta[estate].ownerHistory.some(h => h.owner === owner)) {
-        meta[estate].ownerHistory.push({ owner, at: recordDate });
-      }
-      if (!meta[estate].cycleHistory.some(h => h.cycle === cycle)) {
-        meta[estate].cycleHistory.push({ cycle, at: recordDate });
       }
     });
     return meta;
@@ -1201,10 +1204,10 @@ function App() {
     if (!ownerInputValue.trim()) {
       if (form.estate && estateMetadata[form.estate]) {
         const estateMeta = estateMetadata[form.estate];
-        const estateOwners = Object.entries(estateMeta.ownerCounts)
-          .sort((a, b) => b[1] - a[1])
-          .map(([owner]) => owner)
-          .filter(Boolean);
+        const estateOwners = Object.entries(estateMeta.ownerLastUsed)
+          .filter(([owner]) => owner)
+          .sort((a, b) => b[1].localeCompare(a[1]))
+          .map(([owner]) => owner);
         const otherOwners = uniqueOwners.filter(o => !estateOwners.includes(o));
         return [...estateOwners, ...otherOwners];
       }
@@ -1216,16 +1219,28 @@ function App() {
     );
   }, [ownerInputValue, uniqueOwners, form.estate, estateMetadata]);
 
+  function formatRelativeDate(dateStr) {
+    if (!dateStr) return '';
+    const diff = daysBetween(today, dateStr.split('T')[0]);
+    if (diff === 0) return '今天';
+    if (diff === 1) return '昨天';
+    if (diff < 30) return `${diff}天前`;
+    if (diff < 365) return `${Math.floor(diff / 30)}个月前`;
+    return `${Math.floor(diff / 365)}年前`;
+  }
+
   function getEstateDefaults(estateName) {
     const meta = estateMetadata[estateName];
     if (!meta) return { owner: '', cycle: '' };
     
-    const topOwner = Object.entries(meta.ownerCounts)
-      .sort((a, b) => b[1] - a[1])
+    const topOwner = Object.entries(meta.ownerLastUsed)
+      .filter(([owner]) => owner)
+      .sort((a, b) => b[1].localeCompare(a[1]))
       .map(([owner]) => owner)[0] || '';
     
-    const topCycle = Object.entries(meta.cycleCounts)
-      .sort((a, b) => b[1] - a[1])
+    const topCycle = Object.entries(meta.cycleLastUsed)
+      .filter(([cycle]) => cycle)
+      .sort((a, b) => b[1].localeCompare(a[1]))
       .map(([cycle]) => cycle)[0] || '';
     
     return { owner: topOwner, cycle: topCycle };
@@ -5010,7 +5025,22 @@ function App() {
                             <span>{estate}</span>
                             {estateMetadata[estate] && (
                               <span className="autocomplete-item-meta">
-                                {Object.keys(estateMetadata[estate].ownerCounts).length}位负责人 · {Object.keys(estateMetadata[estate].cycleCounts).length}种周期
+                                {(() => {
+                                  const meta = estateMetadata[estate];
+                                  const recentOwner = Object.entries(meta.ownerLastUsed)
+                                    .filter(([o]) => o)
+                                    .sort((a, b) => b[1].localeCompare(a[1]))[0];
+                                  const recentCycle = Object.entries(meta.cycleLastUsed)
+                                    .filter(([c]) => c)
+                                    .sort((a, b) => b[1].localeCompare(a[1]))[0];
+                                  return (
+                                    <>
+                                      最近负责人：{recentOwner ? `${recentOwner[0]}（${formatRelativeDate(recentOwner[1])}）` : '—'}
+                                      <span style={{ margin: '0 6px' }}>·</span>
+                                      周期：{recentCycle ? recentCycle[0] : '—'}
+                                    </>
+                                  );
+                                })()}
                               </span>
                             )}
                           </div>
@@ -5040,7 +5070,7 @@ function App() {
                     {showOwnerSuggestions && filteredOwnerSuggestions.length > 0 && (
                       <div className="autocomplete-dropdown">
                         {filteredOwnerSuggestions.map((owner) => {
-                          const isEstateOwner = form.estate && estateMetadata[form.estate]?.ownerCounts[owner];
+                          const isEstateOwner = form.estate && estateMetadata[form.estate]?.ownerLastUsed?.[owner];
                           return (
                             <div
                               key={owner}
@@ -5050,7 +5080,7 @@ function App() {
                               <User size={14} className="autocomplete-item-icon" />
                               <span>{owner}</span>
                               {isEstateOwner && (
-                                <span className="autocomplete-item-tag">常用</span>
+                                <span className="autocomplete-item-tag">最近</span>
                               )}
                             </div>
                           );
