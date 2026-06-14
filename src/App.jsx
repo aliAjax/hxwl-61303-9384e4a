@@ -1132,6 +1132,7 @@ function App() {
   const [showOwnerSuggestions, setShowOwnerSuggestions] = useState(false);
   const [estateInputValue, setEstateInputValue] = useState('');
   const [ownerInputValue, setOwnerInputValue] = useState('');
+  const [calendarFilters, setCalendarFilters] = useState({ owner: '全部', cycle: '全部' });
 
   const estateMetadata = useMemo(() => {
     const meta = {};
@@ -1191,6 +1192,16 @@ function App() {
     return Object.entries(ownerCounts)
       .sort((a, b) => b[1] - a[1])
       .map(([owner]) => owner);
+  }, [records]);
+
+  const uniqueCycles = useMemo(() => {
+    const cycles = new Set();
+    records.forEach((record) => {
+      if (record.cycle) {
+        cycles.add(record.cycle);
+      }
+    });
+    return Array.from(cycles).sort();
   }, [records]);
 
   const filteredEstateSuggestions = useMemo(() => {
@@ -2543,15 +2554,36 @@ function App() {
       });
   }, [records, filters]);
 
-  const metrics = [
-    { label: "设备数", value: records.length },
-    { label: "逾期", value: records.filter((item) => item.nextDate < today && item.status !== '已完成').length },
-    { label: "今日", value: records.filter((item) => item.nextDate === today).length },
-    { label: "即将到期", value: records.filter((item) => {
+  const calendarFilteredRecords = useMemo(() => {
+    return records
+      .filter((item) => !filters.query || `${item.estate}${item.elevatorNo}${item.owner}`.includes(filters.query))
+      .filter((item) => filters.status === '全部' || item.status === filters.status)
+      .filter((item) => calendarFilters.owner === '全部' || item.owner === calendarFilters.owner)
+      .filter((item) => calendarFilters.cycle === '全部' || item.cycle === calendarFilters.cycle)
+      .sort((a, b) => {
+        if (appConfig.sort === 'priority') {
+          const rank = priorityRank(a.priority) - priorityRank(b.priority);
+          if (rank !== 0) return rank;
+        }
+        const aDate = a[appConfig.dateKey] || a.sentAt || a.createdAt || '';
+        const bDate = b[appConfig.dateKey] || b.sentAt || b.createdAt || '';
+        return String(aDate).localeCompare(String(bDate));
+      });
+  }, [records, filters, calendarFilters]);
+
+  const metricsSource = useMemo(() => {
+    return viewMode === 'calendar' && !routePlanningView && !workbenchView && !riskDashboardView && !autoPlanView ? calendarFilteredRecords : records;
+  }, [viewMode, routePlanningView, workbenchView, riskDashboardView, autoPlanView, calendarFilteredRecords, records]);
+
+  const metrics = useMemo(() => [
+    { label: "设备数", value: metricsSource.length },
+    { label: "逾期", value: metricsSource.filter((item) => item.nextDate < today && item.status !== '已完成').length },
+    { label: "今日", value: metricsSource.filter((item) => item.nextDate === today).length },
+    { label: "即将到期", value: metricsSource.filter((item) => {
       const rs = getReminderStatus(item, reminderSettings);
       return rs.type === 'soon';
     }).length },
-  ];
+  ], [metricsSource, reminderSettings]);
 
   const groupedByDate = useMemo(() => {
     return filteredRecords.reduce((acc, item) => {
@@ -2574,17 +2606,17 @@ function App() {
   const calendarByDate = useMemo(() => {
     const map = {};
     weekDates.forEach((d) => (map[d] = []));
-    filteredRecords.forEach((item) => {
+    calendarFilteredRecords.forEach((item) => {
       const d = item.nextDate;
       if (d && map[d]) map[d].push(item);
     });
     return map;
-  }, [filteredRecords, weekDates]);
+  }, [calendarFilteredRecords, weekDates]);
 
   const selectedDateRecords = useMemo(() => {
     if (!selectedDate) return [];
-    return filteredRecords.filter((item) => item.nextDate === selectedDate && item.status !== '已完成');
-  }, [filteredRecords, selectedDate]);
+    return calendarFilteredRecords.filter((item) => item.nextDate === selectedDate && item.status !== '已完成');
+  }, [calendarFilteredRecords, selectedDate]);
 
   const groupedByOwner = useMemo(() => {
     const groups = {};
@@ -5299,6 +5331,41 @@ function App() {
                 <span className="week-label">{getWeekLabel(weekOffset)}</span>
                 <button className="week-nav" onClick={() => setWeekOffset(weekOffset + 1)}><ChevronRight size={16} /></button>
                 <button className="week-today" onClick={() => setWeekOffset(0)}>本周</button>
+              </div>
+              <div className="calendar-filters">
+                <div className="calendar-filter-item">
+                  <User size={14} />
+                  <select
+                    value={calendarFilters.owner}
+                    onChange={(e) => setCalendarFilters({ ...calendarFilters, owner: e.target.value })}
+                  >
+                    <option value="全部">全部负责人</option>
+                    {uniqueOwners.map((owner) => (
+                      <option key={owner} value={owner}>{owner}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="calendar-filter-item">
+                  <Zap size={14} />
+                  <select
+                    value={calendarFilters.cycle}
+                    onChange={(e) => setCalendarFilters({ ...calendarFilters, cycle: e.target.value })}
+                  >
+                    <option value="全部">全部周期</option>
+                    {uniqueCycles.map((cycle) => (
+                      <option key={cycle} value={cycle}>{cycle}</option>
+                    ))}
+                  </select>
+                </div>
+                {(calendarFilters.owner !== '全部' || calendarFilters.cycle !== '全部') && (
+                  <button
+                    className="calendar-filter-reset"
+                    onClick={() => setCalendarFilters({ owner: '全部', cycle: '全部' })}
+                  >
+                    <X size={12} />
+                    重置筛选
+                  </button>
+                )}
               </div>
               <div className="calendar-grid">
                 {weekDates.map((date, idx) => {
