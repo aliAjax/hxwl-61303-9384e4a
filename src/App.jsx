@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown } from 'lucide-react';
+import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown, ShieldAlert, AlertOctagon, Clock, UserX, Building } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -382,6 +382,8 @@ function App() {
   const [showBackfillModal, setShowBackfillModal] = useState(false);
   const [backfillItem, setBackfillItem] = useState(null);
   const [backfillForm, setBackfillForm] = useState({ completedAt: '', executor: '', notes: '', nextDate: '' });
+  const [riskDashboardView, setRiskDashboardView] = useState(false);
+  const [expandedRisks, setExpandedRisks] = useState({});
 
   function computeNextDate(baseDate, cycle) {
     const match = cycle && cycle.match(/(\d+)/);
@@ -748,6 +750,111 @@ function App() {
     return records.filter((item) => (item.owner || '未分配') === selectedOwner);
   }, [records, selectedOwner]);
 
+  const OVERLOAD_THRESHOLD = 5;
+  const ESTATE_CONCENTRATION_THRESHOLD = 3;
+  const ESTATE_CONCENTRATION_WINDOW = 7;
+
+  const riskItems = useMemo(() => {
+    const risks = [];
+
+    const overdueItems = records.filter((item) => item.nextDate && item.nextDate < today && item.status !== '已完成');
+    if (overdueItems.length > 0) {
+      risks.push({
+        key: 'overdue',
+        type: 'critical',
+        icon: AlertOctagon,
+        label: '逾期未维保',
+        summary: `${overdueItems.length} 台电梯已超过维保日期未完成`,
+        items: overdueItems.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
+        expanded: expandedRisks['overdue'] !== false
+      });
+    }
+
+    const todayDueItems = records.filter((item) => item.nextDate === today && item.status !== '已完成');
+    if (todayDueItems.length > 0) {
+      risks.push({
+        key: 'today',
+        type: 'warning',
+        icon: Clock,
+        label: '今日到期',
+        summary: `${todayDueItems.length} 台电梯今日需维保`,
+        items: todayDueItems,
+        expanded: expandedRisks['today'] !== false
+      });
+    }
+
+    const soonDueItems = records.filter((item) => {
+      if (!item.nextDate || item.status === '已完成') return false;
+      const diff = daysBetween(item.nextDate, today);
+      return diff > 0 && diff <= 3;
+    });
+    if (soonDueItems.length > 0) {
+      risks.push({
+        key: 'soon3',
+        type: 'info',
+        icon: Bell,
+        label: '3天内到期',
+        summary: `${soonDueItems.length} 台电梯将在3天内到期`,
+        items: soonDueItems.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
+        expanded: expandedRisks['soon3'] !== false
+      });
+    }
+
+    const ownerTaskMap = {};
+    records.forEach((item) => {
+      if (item.status === '已完成') return;
+      const owner = item.owner || '未分配';
+      if (!ownerTaskMap[owner]) ownerTaskMap[owner] = [];
+      ownerTaskMap[owner].push(item);
+    });
+    Object.entries(ownerTaskMap).forEach(([owner, items]) => {
+      if (items.length >= OVERLOAD_THRESHOLD) {
+        const overdueCount = items.filter((it) => it.nextDate < today).length;
+        risks.push({
+          key: `overload_${owner}`,
+          type: 'warning',
+          icon: UserX,
+          label: `${owner} 任务过载`,
+          summary: `${owner} 待处理 ${items.length} 台（逾期 ${overdueCount} 台），超出负荷阈值（${OVERLOAD_THRESHOLD}）`,
+          items: items.sort((a, b) => {
+            if (a.nextDate < today && b.nextDate >= today) return -1;
+            if (b.nextDate < today && a.nextDate >= today) return 1;
+            return a.nextDate.localeCompare(b.nextDate);
+          }),
+          expanded: expandedRisks[`overload_${owner}`] !== false
+        });
+      }
+    });
+
+    const estateWindowMap = {};
+    records.forEach((item) => {
+      if (!item.nextDate || item.status === '已完成') return;
+      const diff = daysBetween(item.nextDate, today);
+      if (diff >= 0 && diff <= ESTATE_CONCENTRATION_WINDOW) {
+        if (!estateWindowMap[item.estate]) estateWindowMap[item.estate] = [];
+        estateWindowMap[item.estate].push(item);
+      }
+    });
+    Object.entries(estateWindowMap).forEach(([estate, items]) => {
+      if (items.length >= ESTATE_CONCENTRATION_THRESHOLD) {
+        const owners = [...new Set(items.map((it) => it.owner || '未分配'))];
+        risks.push({
+          key: `estate_${estate}`,
+          type: 'info',
+          icon: Building,
+          label: `${estate} 集中到期`,
+          summary: `${estate} 有 ${items.length} 台电梯在 ${ESTATE_CONCENTRATION_WINDOW} 天内到期，涉及 ${owners.length} 位负责人`,
+          items: items.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
+          expanded: expandedRisks[`estate_${estate}`] !== false
+        });
+      }
+    });
+
+    const typeOrder = { critical: 0, warning: 1, info: 2 };
+    risks.sort((a, b) => typeOrder[a.type] - typeOrder[b.type]);
+    return risks;
+  }, [records, reminderSettings, expandedRisks]);
+
   const routeDates = useMemo(() => getNextDays(8), []);
 
   const currentRoutePlan = useMemo(() => {
@@ -875,6 +982,10 @@ function App() {
     setExpandedEstates({ ...expandedEstates, [estate]: !expandedEstates[estate] });
   }
 
+  function toggleRiskExpand(key) {
+    setExpandedRisks({ ...expandedRisks, [key]: expandedRisks[key] === false });
+  }
+
   function handleSaveRoutePlan() {
     const finalPlan = {
       ...currentRoutePlan,
@@ -899,25 +1010,29 @@ function App() {
       <section className="hero">
         <div>
           <div className="eyebrow"><Building2 size={18} />{appConfig.domain}</div>
-          <h1>{routePlanningView ? '维保路线编排' : (workbenchView ? '负责人工作台' : appConfig.title)}</h1>
-          <p>{routePlanningView ? '按楼盘聚合待维保设备，灵活编排每日维保路线并保存方案' : (workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : appConfig.subtitle)}</p>
+          <h1>{routePlanningView ? '维保路线编排' : (workbenchView ? '负责人工作台' : (riskDashboardView ? '风险分级看板' : appConfig.title))}</h1>
+          <p>{routePlanningView ? '按楼盘聚合待维保设备，灵活编排每日维保路线并保存方案' : (workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : (riskDashboardView ? '汇总逾期、到期、过载与集中到期风险，点击展开查看相关记录' : appConfig.subtitle))}</p>
         </div>
         <div className="hero-actions">
           <button className="settings-btn" onClick={openSettings} title="维保提醒设置">
             <Settings size={16} />
             提醒设置
           </button>
-          <button className={'view-switch ' + (!routePlanningView && !workbenchView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(false); setSelectedOwner(null); }}>
+          <button className={'view-switch ' + (!routePlanningView && !workbenchView && !riskDashboardView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(false); setRiskDashboardView(false); setSelectedOwner(null); }}>
             <LayoutGrid size={16} />
             路线看板
           </button>
-          <button className={'view-switch ' + (workbenchView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(true); setSelectedDate(null); }}>
+          <button className={'view-switch ' + (workbenchView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(true); setRiskDashboardView(false); setSelectedDate(null); }}>
             <Users size={16} />
             负责人工作台
           </button>
-          <button className={'view-switch ' + (routePlanningView ? 'active' : '')} onClick={() => { setRoutePlanningView(true); setWorkbenchView(false); }}>
+          <button className={'view-switch ' + (routePlanningView ? 'active' : '')} onClick={() => { setRoutePlanningView(true); setWorkbenchView(false); setRiskDashboardView(false); }}>
             <Route size={16} />
             路线编排
+          </button>
+          <button className={'view-switch ' + (riskDashboardView ? 'active' : '')} onClick={() => { setRiskDashboardView(true); setWorkbenchView(false); setRoutePlanningView(false); }}>
+            <ShieldAlert size={16} />
+            风险看板
           </button>
         </div>
       </section>
@@ -1459,8 +1574,7 @@ function App() {
           </div>
         </section>
       ) : workbenchView ? (
-        <section className="workbench">
-          <section className="panel owners-panel">
+        <section className="workbench">          <section className="panel owners-panel">
             <div className="panel-title">
               <Users size={18} />
               <h2>负责人汇总</h2>
@@ -1550,6 +1664,125 @@ function App() {
               <p className="empty">点击左侧负责人卡片，查看对应维保记录并修改状态。</p>
             )}
           </aside>
+        </section>
+      ) : riskDashboardView ? (
+        <section className="risk-dashboard">
+          <div className="risk-summary-bar">
+            <div className="risk-summary-item risk-critical">
+              <AlertOctagon size={20} />
+              <div className="risk-summary-text">
+                <span className="risk-summary-num">{records.filter((item) => item.nextDate && item.nextDate < today && item.status !== '已完成').length}</span>
+                <span className="risk-summary-label">逾期</span>
+              </div>
+            </div>
+            <div className="risk-summary-item risk-warning">
+              <Clock size={20} />
+              <div className="risk-summary-text">
+                <span className="risk-summary-num">{records.filter((item) => item.nextDate === today && item.status !== '已完成').length}</span>
+                <span className="risk-summary-label">今日到期</span>
+              </div>
+            </div>
+            <div className="risk-summary-item risk-soon">
+              <Bell size={20} />
+              <div className="risk-summary-text">
+                <span className="risk-summary-num">{records.filter((item) => { if (!item.nextDate || item.status === '已完成') return false; const d = daysBetween(item.nextDate, today); return d > 0 && d <= 3; }).length}</span>
+                <span className="risk-summary-label">3天内到期</span>
+              </div>
+            </div>
+            <div className="risk-summary-item risk-overload">
+              <UserX size={20} />
+              <div className="risk-summary-text">
+                <span className="risk-summary-num">{(() => { const m = {}; records.forEach((r) => { if (r.status === '已完成') return; const o = r.owner || '未分配'; m[o] = (m[o] || 0) + 1; }); return Object.values(m).filter((c) => c >= OVERLOAD_THRESHOLD).length; })()}</span>
+                <span className="risk-summary-label">负责人过载</span>
+              </div>
+            </div>
+            <div className="risk-summary-item risk-estate">
+              <Building size={20} />
+              <div className="risk-summary-text">
+                <span className="risk-summary-num">{(() => { const m = {}; records.forEach((r) => { if (!r.nextDate || r.status === '已完成') return; const d = daysBetween(r.nextDate, today); if (d >= 0 && d <= ESTATE_CONCENTRATION_WINDOW) { m[r.estate] = (m[r.estate] || 0) + 1; } }); return Object.values(m).filter((c) => c >= ESTATE_CONCENTRATION_THRESHOLD).length; })()}</span>
+                <span className="risk-summary-label">楼盘集中到期</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="risk-list">
+            {riskItems.length === 0 ? (
+              <div className="risk-empty">
+                <ShieldAlert size={48} />
+                <h3>暂无风险项</h3>
+                <p>当前所有电梯维保状态正常，未检测到逾期、过载或集中到期风险。</p>
+              </div>
+            ) : (
+              riskItems.map((risk) => {
+                const RiskIcon = risk.icon;
+                const isExpanded = risk.expanded;
+                return (
+                  <div key={risk.key} className={'risk-card risk-type-' + risk.type}>
+                    <div className="risk-card-header" onClick={() => toggleRiskExpand(risk.key)}>
+                      <div className="risk-card-title">
+                        <span className={'risk-icon risk-icon-' + risk.type}><RiskIcon size={18} /></span>
+                        <div>
+                          <h3>{risk.label}</h3>
+                          <p>{risk.summary}</p>
+                        </div>
+                      </div>
+                      <div className="risk-card-meta">
+                        <span className="risk-count">{risk.items.length} 条记录</span>
+                        <ChevronDown size={18} className={'risk-chevron ' + (isExpanded ? 'expanded' : '')} />
+                      </div>
+                    </div>
+                    {isExpanded && (
+                      <div className="risk-card-body">
+                        {risk.items.map((item) => {
+                          const rs = getReminderStatus(item, reminderSettings);
+                          const dateDiff = item.nextDate ? daysBetween(item.nextDate, today) : null;
+                          let dateLabel = '';
+                          if (dateDiff !== null) {
+                            if (dateDiff < 0) dateLabel = `逾期${Math.abs(dateDiff)}天`;
+                            else if (dateDiff === 0) dateLabel = '今日到期';
+                            else dateLabel = `${dateDiff}天后到期`;
+                          }
+                          return (
+                            <div
+                              key={item.id}
+                              className={'risk-record-item ' + reminderStatusClass(rs.type)}
+                              onClick={() => setSelected(item)}
+                            >
+                              <div className="risk-record-head">
+                                <div>
+                                  <h4>{item.estate} {item.building}</h4>
+                                  <p>{item.elevatorNo} · {item.cycle} · {item.owner}</p>
+                                </div>
+                                <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                              </div>
+                              <div className="risk-record-meta">
+                                <span className="risk-record-date">下次维保：{item.nextDate}</span>
+                                {dateLabel && <span className={'risk-date-tag risk-date-' + (dateDiff < 0 ? 'overdue' : dateDiff === 0 ? 'today' : 'soon')}>{dateLabel}</span>}
+                              </div>
+                              {rs.type !== 'none' && (
+                                <div className={'reminder-tag ' + reminderStatusClass(rs.type)}>
+                                  {rs.type === 'overdue' && <AlertTriangle size={12} />}
+                                  {rs.type === 'today' && <Zap size={12} />}
+                                  {rs.type === 'soon' && <Bell size={12} />}
+                                  {rs.label}
+                                </div>
+                              )}
+                              <div className="risk-record-actions">
+                                {appConfig.statuses.map((status) => (
+                                  <button key={status} type="button" onClick={(e) => { e.stopPropagation(); status === '已完成' ? openBackfillModal(item) : updateStatus(item.id, status); }}>{status}</button>
+                                ))}
+                                <button type="button" className="risk-detail-btn" onClick={(e) => { e.stopPropagation(); setSelected(item); setRiskDashboardView(false); }}>查看详情</button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
         </section>
       ) : (
         <>
