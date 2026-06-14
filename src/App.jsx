@@ -305,7 +305,7 @@ function validateImportData(parsed) {
 
   if (!parsed || typeof parsed !== 'object') {
     errors.push('文件格式错误：不是有效的JSON对象');
-    return { valid: false, errors, warnings, summary: null };
+    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
   }
 
   if (!parsed.appId) {
@@ -322,7 +322,7 @@ function validateImportData(parsed) {
 
   if (!parsed.data || typeof parsed.data !== 'object') {
     errors.push('文件结构错误：缺少 data 节点');
-    return { valid: false, errors, warnings, summary: null };
+    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
   }
 
   const { data } = parsed;
@@ -340,11 +340,105 @@ function validateImportData(parsed) {
   }
 
   if (errors.length > 0) {
-    return { valid: false, errors, warnings, summary: null };
+    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
+  }
+
+  const { recordErrors, invalidRecordCount } = validateRecordsDetail(data.records);
+  if (recordErrors.length > 0) {
+    const recordErrorSummary = `记录校验失败：共 ${invalidRecordCount} 条记录存在字段缺失或格式错误`;
+    errors.push(recordErrorSummary);
+    const summary = computeDataSummary(data.records);
+    return { valid: false, errors, warnings, summary, recordErrors, data };
   }
 
   const summary = computeDataSummary(data.records);
-  return { valid: true, errors, warnings, summary, data };
+  return { valid: true, errors, warnings, summary, recordErrors: [], data };
+}
+
+function validateRecordsDetail(records) {
+  const recordErrors = [];
+  const validCycles = appConfig.fields.find(f => f.key === 'cycle')?.options || [];
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  const validStatuses = appConfig.statuses;
+  const fieldLabels = {};
+  appConfig.fields.forEach(f => { fieldLabels[f.key] = f.label; });
+
+  records.forEach((record, index) => {
+    const errors = [];
+
+    appConfig.fields.forEach(field => {
+      const value = record[field.key];
+      const label = field.label;
+      if (!value) {
+        errors.push({ type: 'missing', field: label, key: field.key });
+      } else if (field.key === 'cycle' && !validCycles.includes(value)) {
+        errors.push({ type: 'invalidCycle', field: label, value, key: field.key });
+      } else if (field.key === 'nextDate') {
+        if (!datePattern.test(value)) {
+          errors.push({ type: 'invalidDate', field: label, value, key: field.key });
+        } else {
+          const date = new Date(value);
+          if (isNaN(date.getTime())) {
+            errors.push({ type: 'invalidDate', field: label, value, key: field.key });
+          }
+        }
+      }
+    });
+
+    if (record.status && !validStatuses.includes(record.status)) {
+      errors.push({ type: 'invalidStatus', field: '当前状态', value: record.status, key: 'status' });
+    }
+
+    if (errors.length > 0) {
+      recordErrors.push({
+        index,
+        record,
+        errors
+      });
+    }
+  });
+
+  const seenElevatorNos = {};
+  records.forEach((record, index) => {
+    const elevatorNo = record.elevatorNo;
+    if (elevatorNo) {
+      if (seenElevatorNos[elevatorNo]) {
+        const existingError = recordErrors.find(e => e.index === index);
+        if (existingError) {
+          existingError.errors.push({ type: 'duplicate', field: '电梯编号', value: elevatorNo, key: 'elevatorNo' });
+        } else {
+          recordErrors.push({
+            index,
+            record,
+            errors: [{ type: 'duplicate', field: '电梯编号', value: elevatorNo, key: 'elevatorNo' }]
+          });
+        }
+        seenElevatorNos[elevatorNo].push(index);
+      } else {
+        seenElevatorNos[elevatorNo] = [index];
+      }
+    }
+  });
+
+  Object.entries(seenElevatorNos).forEach(([no, indices]) => {
+    if (indices.length > 1) {
+      indices.forEach(idx => {
+        const errItem = recordErrors.find(e => e.index === idx);
+        if (!errItem) {
+          recordErrors.push({
+            index: idx,
+            record: records[idx],
+            errors: [{ type: 'duplicate', field: '电梯编号', value: no, key: 'elevatorNo' }]
+          });
+        }
+      });
+    }
+  });
+
+  return {
+    recordErrors,
+    invalidRecordCount: new Set(recordErrors.map(e => e.index)).size
+  };
 }
 
 function computeDataSummary(records) {
@@ -1448,6 +1542,43 @@ function App() {
                         {err}
                       </div>
                     ))}
+
+                    {importValidation.recordErrors && importValidation.recordErrors.length > 0 && (
+                      <div className="dm-record-errors">
+                        <div className="dm-record-errors-title">
+                          <AlertOctagon size={14} />
+                          记录明细错误（前 {Math.min(importValidation.recordErrors.length, 10)} 条）
+                        </div>
+                        <div className="dm-record-errors-list">
+                          {importValidation.recordErrors.slice(0, 10).map((item, idx) => (
+                            <div key={idx} className="dm-record-error-item">
+                              <div className="dm-record-error-head">
+                                <span className="dm-record-index">第 {item.index + 1} 条记录</span>
+                                <span className="dm-record-elevator">
+                                  {item.record.elevatorNo || item.record.estate || '未标识记录'}
+                                </span>
+                              </div>
+                              <div className="dm-record-error-tags">
+                                {item.errors.map((err, errIdx) => (
+                                  <span key={errIdx} className="dm-error-tag">
+                                    {err.type === 'missing' && `${err.field}缺失`}
+                                    {err.type === 'invalidCycle' && `不支持的维保周期：${err.value}`}
+                                    {err.type === 'invalidDate' && `日期格式错误：${err.value}`}
+                                    {err.type === 'invalidStatus' && `无效状态：${err.value}`}
+                                    {err.type === 'duplicate' && `电梯编号重复：${err.value}`}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {importValidation.recordErrors.length > 10 && (
+                          <div className="dm-more-errors-hint">
+                            还有 {importValidation.recordErrors.length - 10} 条记录存在错误，请修正后重新导入
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
