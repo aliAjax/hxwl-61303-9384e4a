@@ -280,8 +280,20 @@ function getBusinessKey(record) {
   return record.businessKey || record.elevatorNo || '';
 }
 
-function migrateRecord(record) {
+function normalizeTimelineEntry(entry, defaultStatus) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    status: entry.status || defaultStatus || appConfig.primaryStatus,
+    at: entry.at || today,
+    by: entry.by || '系统',
+    ...(entry.notes ? { notes: entry.notes } : {}),
+    ...(entry.backfill ? { backfill: entry.backfill } : {})
+  };
+}
+
+function migrateRecord(record, options = {}) {
   const now = new Date().toISOString();
+  const { refreshUpdatedAt = false } = options;
   const migrated = { ...record };
   
   if (!migrated.id) {
@@ -295,16 +307,26 @@ function migrateRecord(record) {
   if (!migrated.createdAt) {
     if (migrated.timeline && migrated.timeline.length > 0) {
       const firstTimeline = migrated.timeline[0];
-      migrated.createdAt = firstTimeline.at ? new Date(firstTimeline.at + 'T00:00:00').toISOString() : now;
+      try {
+        const d = new Date(firstTimeline.at + 'T00:00:00');
+        migrated.createdAt = isNaN(d.getTime()) ? now : d.toISOString();
+      } catch {
+        migrated.createdAt = now;
+      }
     } else {
       migrated.createdAt = now;
     }
   }
   
-  if (!migrated.updatedAt) {
+  if (refreshUpdatedAt || !migrated.updatedAt) {
     if (migrated.timeline && migrated.timeline.length > 0) {
       const lastTimeline = migrated.timeline[migrated.timeline.length - 1];
-      migrated.updatedAt = lastTimeline.at ? new Date(lastTimeline.at + 'T00:00:00').toISOString() : now;
+      try {
+        const d = new Date(lastTimeline.at + 'T00:00:00');
+        migrated.updatedAt = isNaN(d.getTime()) ? now : d.toISOString();
+      } catch {
+        migrated.updatedAt = now;
+      }
     } else {
       migrated.updatedAt = now;
     }
@@ -312,6 +334,19 @@ function migrateRecord(record) {
   
   if (!migrated.timeline) {
     migrated.timeline = [{ status: migrated.status || appConfig.primaryStatus, at: today, by: '系统迁移' }];
+  } else if (Array.isArray(migrated.timeline)) {
+    const normalizedTimeline = migrated.timeline
+      .map(e => normalizeTimelineEntry(e, migrated.status))
+      .filter(Boolean);
+    if (normalizedTimeline.length > 0) {
+      migrated.timeline = normalizedTimeline;
+    } else {
+      migrated.timeline = [{ status: migrated.status || appConfig.primaryStatus, at: today, by: '系统迁移' }];
+    }
+  }
+  
+  if (!migrated.status) {
+    migrated.status = appConfig.primaryStatus;
   }
   
   return migrated;
@@ -565,29 +600,49 @@ function resolveConflict(conflict, resolution, customMerge) {
   const now = new Date().toISOString();
   
   switch (resolution) {
-    case 'keepLocal':
-      return { 
-        ...localRecord, 
-        timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
-        updatedAt: now 
-      };
+    case 'keepLocal': {
+      const result = { ...localRecord };
+      Object.keys(importRecord || {}).forEach((key) => {
+        if (key === 'id' || key === 'businessKey' || key === 'timeline' || key === 'createdAt' || key === 'updatedAt') return;
+        if (!result.hasOwnProperty(key) && importRecord[key] !== undefined && importRecord[key] !== null && importRecord[key] !== '') {
+          result[key] = importRecord[key];
+        }
+      });
+      result.updatedAt = now;
+      if (importRecord?.temps && importRecord.temps.length > 0) {
+        const mergedTemps = [...(localRecord.temps || [])];
+        importRecord.temps.forEach((t) => {
+          if (!mergedTemps.includes(t)) mergedTemps.push(t);
+        });
+        if (mergedTemps.length > (localRecord.temps || []).length) result.temps = mergedTemps;
+      }
+      return result;
+    }
     
-    case 'useImport':
-      return { 
-        ...importRecord, 
-        id: localRecord.id,
-        businessKey: localRecord.businessKey,
-        timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
-        updatedAt: now 
-      };
+    case 'useImport': {
+      const result = { ...importRecord };
+      result.id = localRecord.id;
+      result.businessKey = localRecord.businessKey;
+      if (!result.createdAt) result.createdAt = localRecord.createdAt;
+      result.updatedAt = now;
+      if (localRecord?.temps && localRecord.temps.length > 0) {
+        const mergedTemps = [...(importRecord.temps || [])];
+        localRecord.temps.forEach((t) => {
+          if (!mergedTemps.includes(t)) mergedTemps.push(t);
+        });
+        if (mergedTemps.length > (importRecord.temps || []).length) result.temps = mergedTemps;
+      }
+      return result;
+    }
     
-    case 'manual':
+    case 'manual': {
       const merged = mergeRecordFields(localRecord, importRecord, customMerge);
       return {
         ...merged,
         timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
         updatedAt: now
       };
+    }
     
     default:
       return localRecord;
@@ -1147,9 +1202,76 @@ function App() {
     setParsedImport(null);
   }
 
+  function recordsChanged(prev, next) {
+    if (prev.length !== next.length) return true;
+    
+    const prevMap = new Map(prev.map(r => [r.id, r]));
+    for (const nextRecord of next) {
+      const prevRecord = prevMap.get(nextRecord.id);
+      if (!prevRecord) return true;
+      
+      const allKeys = new Set([...Object.keys(prevRecord), ...Object.keys(nextRecord)]);
+      for (const key of allKeys) {
+        if (key === 'updatedAt') continue;
+        const prevVal = prevRecord[key];
+        const nextVal = nextRecord[key];
+        if (Array.isArray(prevVal) && Array.isArray(nextVal)) {
+          if (JSON.stringify(prevVal) !== JSON.stringify(nextVal)) return true;
+        } else if (typeof prevVal === 'object' && prevVal !== null && typeof nextVal === 'object' && nextVal !== null) {
+          if (JSON.stringify(prevVal) !== JSON.stringify(nextVal)) return true;
+        } else if (prevVal !== nextVal) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   function persist(next) {
-    setRecords(next);
-    localStorage.setItem(appConfig.storage, JSON.stringify(next));
+    const changedIds = new Set();
+    if (recordsChanged(records, next)) {
+      const prevMap = new Map(records.map(r => [r.id, r]));
+      next.forEach((r, idx) => {
+        const prev = prevMap.get(r.id);
+        if (!prev) {
+          changedIds.add(r.id);
+        } else {
+          const allKeys = new Set([...Object.keys(prev), ...Object.keys(r)]);
+          for (const key of allKeys) {
+            if (key === 'updatedAt') continue;
+            const prevVal = prev[key];
+            const nextVal = r[key];
+            let isDiff = false;
+            if (Array.isArray(prevVal) && Array.isArray(nextVal)) {
+              if (JSON.stringify(prevVal) !== JSON.stringify(nextVal)) isDiff = true;
+            } else if (typeof prevVal === 'object' && prevVal !== null && typeof nextVal === 'object' && nextVal !== null) {
+              if (JSON.stringify(prevVal) !== JSON.stringify(nextVal)) isDiff = true;
+            } else if (prevVal !== nextVal) {
+              isDiff = true;
+            }
+            if (isDiff) {
+              changedIds.add(r.id);
+              break;
+            }
+          }
+        }
+      });
+    }
+
+    const now = new Date().toISOString();
+    const normalized = next.map((record) => {
+      const migrated = migrateRecord(record);
+      if (changedIds.has(migrated.id)) {
+        migrated.updatedAt = now;
+      }
+      if (!migrated.businessKey) {
+        migrated.businessKey = migrated.elevatorNo || migrated.id;
+      }
+      return migrated;
+    });
+    
+    setRecords(normalized);
+    localStorage.setItem(appConfig.storage, JSON.stringify(normalized));
   }
 
   function addRecord(event) {
@@ -1507,8 +1629,6 @@ function App() {
         if (!seenKeys.has(key)) {
           seenKeys.add(key);
           const merged = mergeRecordFields(localRecord, importRecord, null);
-          merged.timeline = mergeTimelines(localRecord.timeline || [], importRecord.timeline || []);
-          merged.updatedAt = new Date().toISOString();
           mergedRecords.push(merged);
         }
       });
@@ -2593,7 +2713,7 @@ function App() {
                             <div className="resolution-btn-icon local-icon">💾</div>
                             <div className="resolution-btn-text">
                               <strong>保留本地</strong>
-                              <span>使用本地版本，忽略导入数据</span>
+                              <span>使用本地字段和时间线</span>
                             </div>
                           </button>
                           <button
@@ -2603,7 +2723,7 @@ function App() {
                             <div className="resolution-btn-icon import-icon">📥</div>
                             <div className="resolution-btn-text">
                               <strong>使用导入</strong>
-                              <span>用导入数据覆盖本地</span>
+                              <span>使用导入字段和时间线</span>
                             </div>
                           </button>
                           <button
