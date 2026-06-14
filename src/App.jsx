@@ -184,6 +184,76 @@ const DATA_EXPORT_APP_ID = 'hxwl-61303-elevator-maintenance';
 const MERGE_DATA_VERSION = '1.0.0';
 const MERGE_DATA_APP_ID = 'hxwl-61303-elevator-maintenance';
 
+const AUTO_PLAN_DRAFT_STORAGE_KEY = 'hxwl-61303-auto-plan-draft';
+const AUTO_PLAN_HISTORY_STORAGE_KEY = 'hxwl-61303-auto-plan-history';
+const AUTO_PLAN_CONFIG_STORAGE_KEY = 'hxwl-61303-auto-plan-config';
+
+const DEFAULT_AUTO_PLAN_CONFIG = {
+  planDays: 30,
+  defaultDailyLimit: 5,
+  ownerDailyLimits: {},
+  estateConcentration: true,
+  priorityOverdue: true,
+  prioritySoon: true
+};
+
+function loadAutoPlanDraft() {
+  const raw = localStorage.getItem(AUTO_PLAN_DRAFT_STORAGE_KEY);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function saveAutoPlanDraft(draft) {
+  localStorage.setItem(AUTO_PLAN_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+}
+
+function clearAutoPlanDraft() {
+  localStorage.removeItem(AUTO_PLAN_DRAFT_STORAGE_KEY);
+}
+
+function loadAutoPlanHistory() {
+  const raw = localStorage.getItem(AUTO_PLAN_HISTORY_STORAGE_KEY);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function saveAutoPlanHistory(history) {
+  localStorage.setItem(AUTO_PLAN_HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, 50)));
+}
+
+function loadAutoPlanConfig() {
+  const raw = localStorage.getItem(AUTO_PLAN_CONFIG_STORAGE_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      return { ...DEFAULT_AUTO_PLAN_CONFIG, ...parsed };
+    } catch {
+      return { ...DEFAULT_AUTO_PLAN_CONFIG };
+    }
+  }
+  return { ...DEFAULT_AUTO_PLAN_CONFIG };
+}
+
+function saveAutoPlanConfig(config) {
+  localStorage.setItem(AUTO_PLAN_CONFIG_STORAGE_KEY, JSON.stringify(config));
+}
+
+function planUid() {
+  return 'plan_' + Math.random().toString(36).slice(2, 12);
+}
+
 function getNextDays(count) {
   const dates = [];
   const now = new Date(today + 'T00:00:00');
@@ -1046,6 +1116,15 @@ function App() {
   const [manualMergeForm, setManualMergeForm] = useState({});
   const [showManualMergeModal, setShowManualMergeModal] = useState(false);
   const [deviceInfo, setDeviceInfo] = useState({ name: '', id: '' });
+  const [autoPlanView, setAutoPlanView] = useState(false);
+  const [autoPlanDraft, setAutoPlanDraft] = useState(loadAutoPlanDraft);
+  const [autoPlanHistory, setAutoPlanHistory] = useState(loadAutoPlanHistory);
+  const [autoPlanConfig, setAutoPlanConfig] = useState(loadAutoPlanConfig);
+  const [tempAutoPlanConfig, setTempAutoPlanConfig] = useState(loadAutoPlanConfig);
+  const [showAutoPlanConfig, setShowAutoPlanConfig] = useState(false);
+  const [expandedPlanDates, setExpandedPlanDates] = useState({});
+  const [planEditItem, setPlanEditItem] = useState(null);
+  const [planEditForm, setPlanEditForm] = useState({ date: '', owner: '' });
 
   function computeNextDate(baseDate, cycle) {
     const match = cycle && cycle.match(/(\d+)/);
@@ -1677,6 +1756,464 @@ function App() {
     setSelected(next.find((record) => record.id === item.id));
   }
 
+  function getOwnerDailyLimit(owner, config) {
+    return config.ownerDailyLimits?.[owner] ?? config.defaultDailyLimit;
+  }
+
+  function generateAutoPlan(config = autoPlanConfig) {
+    const planDays = config.planDays || 30;
+    const dates = getNextDays(planDays);
+    const datePlan = {};
+    dates.forEach((d) => { datePlan[d] = []; });
+
+    const ownerDailyCounts = {};
+    Object.keys(datePlan).forEach((d) => {
+      ownerDailyCounts[d] = {};
+    });
+
+    const recordsInRoutePlans = new Set();
+    Object.values(routePlans).forEach((plan) => {
+      plan?.routes?.forEach((r) => {
+        r.deviceIds?.forEach((id) => recordsInRoutePlans.add(id));
+      });
+    });
+
+    if (autoPlanDraft) {
+      Object.values(autoPlanDraft.dates || {}).forEach((items) => {
+        items.forEach((item) => recordsInRoutePlans.delete(item.recordId));
+      });
+    }
+
+    const candidateRecords = records.filter((item) => {
+      if (item.status === '已完成') return false;
+      if (!item.nextDate) return false;
+      const diff = daysBetween(item.nextDate, today);
+      if (diff > planDays - 1) return false;
+      return true;
+    });
+
+    const scoredRecords = candidateRecords.map((item) => {
+      const diff = daysBetween(item.nextDate, today);
+      let priority = 0;
+      if (diff < 0) {
+        priority = 1000 + Math.abs(diff) * 50;
+      } else if (diff === 0) {
+        priority = 800;
+      } else {
+        const advanceDays = reminderSettings[item.cycle] || 0;
+        if (diff <= advanceDays) {
+          priority = 600 - diff * 10;
+        } else {
+          priority = 100 - diff;
+        }
+      }
+      return {
+        record: item,
+        recordId: item.id,
+        diff,
+        priority,
+        estate: item.estate,
+        owner: item.owner || '未分配'
+      };
+    });
+
+    scoredRecords.sort((a, b) => {
+      if (a.priority !== b.priority) return b.priority - a.priority;
+      if (a.diff !== b.diff) return a.diff - b.diff;
+      return a.estate.localeCompare(b.estate);
+    });
+
+    function findBestDate(scoredItem, preferredStartIdx = 0) {
+      const { record, diff, owner } = scoredItem;
+      const minDateIdx = Math.max(0, Math.min(0, diff < 0 ? 0 : diff));
+
+      let bestDateIdx = -1;
+      let bestEstateCountBonus = -1;
+
+      for (let i = Math.max(preferredStartIdx, minDateIdx); i < dates.length; i++) {
+        const date = dates[i];
+        const ownerLimit = getOwnerDailyLimit(owner, config);
+        const currentOwnerCount = ownerDailyCounts[date][owner] || 0;
+        if (currentOwnerCount >= ownerLimit) continue;
+
+        let estateCountBonus = 0;
+        if (config.estateConcentration) {
+          estateCountBonus = datePlan[date].filter(
+            (item) => item.estate === record.estate
+          ).length;
+        }
+
+        if (estateCountBonus > bestEstateCountBonus) {
+          bestEstateCountBonus = estateCountBonus;
+          bestDateIdx = i;
+          if (estateCountBonus >= 2 && i === minDateIdx) break;
+        }
+
+        if (i === minDateIdx && bestDateIdx === -1) {
+          bestDateIdx = i;
+        }
+      }
+
+      if (bestDateIdx === -1) {
+        for (let i = minDateIdx; i < dates.length; i++) {
+          const date = dates[i];
+          const itemsOnDate = datePlan[date].length;
+          const allOwners = [...new Set(datePlan[date].map((it) => it.owner))];
+          let hasSlot = false;
+          for (const o of allOwners) {
+            const limit = getOwnerDailyLimit(o, config);
+            const cnt = ownerDailyCounts[date][o] || 0;
+            if (cnt < limit) { hasSlot = true; break; }
+          }
+          if (!hasSlot) {
+            const defaultLimit = config.defaultDailyLimit;
+            if (itemsOnDate < defaultLimit * 2) {
+              bestDateIdx = i;
+              break;
+            }
+          } else {
+            bestDateIdx = i;
+            break;
+          }
+        }
+      }
+
+      return bestDateIdx >= 0 ? dates[bestDateIdx] : null;
+    }
+
+    const draftItems = [];
+    const unassignedItems = [];
+
+    scoredRecords.forEach((scoredItem) => {
+      const date = findBestDate(scoredItem);
+      if (date) {
+        const planItem = {
+          planId: planUid(),
+          recordId: scoredItem.recordId,
+          estate: scoredItem.estate,
+          building: scoredItem.record.building,
+          elevatorNo: scoredItem.record.elevatorNo,
+          cycle: scoredItem.record.cycle,
+          originalNextDate: scoredItem.record.nextDate,
+          plannedDate: date,
+          owner: scoredItem.owner,
+          priority: scoredItem.priority,
+          daysDiff: scoredItem.diff,
+          status: 'draft'
+        };
+        datePlan[date].push(planItem);
+        ownerDailyCounts[date][scoredItem.owner] = (ownerDailyCounts[date][scoredItem.owner] || 0) + 1;
+        draftItems.push(planItem);
+      } else {
+        unassignedItems.push(scoredItem);
+      }
+    });
+
+    Object.keys(datePlan).forEach((date) => {
+      datePlan[date].sort((a, b) => {
+        if (a.estate !== b.estate) return a.estate.localeCompare(b.estate);
+        return String(a.building).localeCompare(String(b.building));
+      });
+    });
+
+    const draft = {
+      id: planUid(),
+      createdAt: new Date().toISOString(),
+      config: { ...config },
+      dates: datePlan,
+      dateList: dates,
+      totalCount: draftItems.length,
+      unassignedCount: unassignedItems.length,
+      unassignedItems: unassignedItems.map((si) => ({
+        recordId: si.recordId,
+        estate: si.estate,
+        building: si.record.building,
+        elevatorNo: si.record.elevatorNo,
+        owner: si.owner,
+        originalNextDate: si.record.nextDate,
+        daysDiff: si.diff
+      }))
+    };
+
+    setAutoPlanDraft(draft);
+    saveAutoPlanDraft(draft);
+    return draft;
+  }
+
+  function updatePlanItemDate(planId, newDate, newOwner) {
+    if (!autoPlanDraft) return;
+
+    let movedItem = null;
+    let oldDate = null;
+
+    const newDates = { ...autoPlanDraft.dates };
+    Object.keys(newDates).forEach((date) => {
+      const items = newDates[date];
+      const idx = items.findIndex((it) => it.planId === planId);
+      if (idx !== -1) {
+        movedItem = { ...items[idx] };
+        oldDate = date;
+        items.splice(idx, 1);
+      }
+    });
+
+    if (!movedItem) return;
+
+    if (newOwner) {
+      movedItem.owner = newOwner;
+    }
+    movedItem.plannedDate = newDate;
+
+    if (!newDates[newDate]) {
+      newDates[newDate] = [];
+    }
+    newDates[newDate].push(movedItem);
+
+    Object.keys(newDates).forEach((date) => {
+      newDates[date].sort((a, b) => {
+        if (a.estate !== b.estate) return a.estate.localeCompare(b.estate);
+        return String(a.building).localeCompare(String(b.building));
+      });
+    });
+
+    const newDraft = {
+      ...autoPlanDraft,
+      dates: newDates,
+      updatedAt: new Date().toISOString()
+    };
+    setAutoPlanDraft(newDraft);
+    saveAutoPlanDraft(newDraft);
+  }
+
+  function removePlanItem(planId) {
+    if (!autoPlanDraft) return;
+
+    const newDates = { ...autoPlanDraft.dates };
+    Object.keys(newDates).forEach((date) => {
+      newDates[date] = newDates[date].filter((it) => it.planId !== planId);
+    });
+
+    const newDraft = {
+      ...autoPlanDraft,
+      dates: newDates,
+      totalCount: autoPlanDraft.totalCount - 1,
+      updatedAt: new Date().toISOString()
+    };
+    setAutoPlanDraft(newDraft);
+    saveAutoPlanDraft(newDraft);
+  }
+
+  function discardPlanDraft() {
+    if (!confirm('确定要放弃当前草稿吗？所有未确认的计划将被清除。')) return;
+    setAutoPlanDraft(null);
+    clearAutoPlanDraft();
+    setPlanEditItem(null);
+  }
+
+  function confirmAutoPlan() {
+    if (!autoPlanDraft) return;
+    if (!confirm('确认提交此计划？系统将：\n1. 更新所有计划设备的维保日期\n2. 将状态设置为「今日执行」（当天日期的设备）\n3. 自动生成路线方案\n4. 记录操作历史以便回滚')) return;
+
+    const snapshot = {
+      records: JSON.parse(JSON.stringify(records)),
+      routePlans: JSON.parse(JSON.stringify(routePlans))
+    };
+
+    const updatedRecordsMap = new Map();
+    records.forEach((r) => updatedRecordsMap.set(r.id, { ...r }));
+
+    const newRoutePlans = { ...routePlans };
+
+    Object.entries(autoPlanDraft.dates).forEach(([date, items]) => {
+      if (items.length === 0) return;
+
+      items.forEach((item) => {
+        const record = updatedRecordsMap.get(item.recordId);
+        if (!record) return;
+
+        const timelineEntry = {
+          status: date === today ? '今日执行' : '待维保',
+          at: today,
+          by: '自动计划生成器',
+          plan: {
+            planId: autoPlanDraft.id,
+            originalNextDate: record.nextDate,
+            plannedDate: date,
+            plannedOwner: item.owner || record.owner
+          }
+        };
+
+        record.nextDate = date;
+        record.status = date === today ? '今日执行' : '待维保';
+        if (item.owner && item.owner !== '未分配') {
+          record.owner = item.owner;
+        }
+        record.timeline = [...(record.timeline || []), timelineEntry];
+        updatedRecordsMap.set(record.id, record);
+      });
+
+      const estateGroups = {};
+      items.forEach((item) => {
+        if (!estateGroups[item.estate]) estateGroups[item.estate] = [];
+        estateGroups[item.estate].push(item.recordId);
+      });
+
+      if (!newRoutePlans[date]) {
+        newRoutePlans[date] = getEmptyRoutePlan(date);
+      }
+
+      Object.entries(estateGroups).forEach(([estate, deviceIds]) => {
+        const existingRoute = newRoutePlans[date].routes.find((r) => r.estate === estate);
+        if (existingRoute) {
+          deviceIds.forEach((id) => {
+            if (!existingRoute.deviceIds.includes(id)) {
+              existingRoute.deviceIds.push(id);
+            }
+          });
+        } else {
+          newRoutePlans[date].routes.push({
+            id: routeUid(),
+            estate,
+            deviceIds
+          });
+        }
+      });
+
+      newRoutePlans[date].updatedAt = new Date().toISOString();
+    });
+
+    const finalRecords = Array.from(updatedRecordsMap.values());
+    persist(finalRecords);
+    persistRoutePlans(newRoutePlans);
+
+    const historyEntry = {
+      id: planUid(),
+      type: 'confirm',
+      planId: autoPlanDraft.id,
+      timestamp: new Date().toISOString(),
+      description: `确认维保计划（${autoPlanDraft.totalCount} 台设备，${Object.keys(autoPlanDraft.dates).filter(d => (autoPlanDraft.dates[d]?.length || 0) > 0).length} 天）`,
+      snapshot,
+      affectedCount: autoPlanDraft.totalCount
+    };
+    const newHistory = [historyEntry, ...autoPlanHistory];
+    setAutoPlanHistory(newHistory);
+    saveAutoPlanHistory(newHistory);
+
+    setAutoPlanDraft(null);
+    clearAutoPlanDraft();
+    setPlanEditItem(null);
+    alert(`计划确认成功！\n\n共安排 ${autoPlanDraft.totalCount} 台设备，已更新记录状态和路线方案。\n您可以在「操作历史」中回滚此操作。`);
+  }
+
+  function rollbackHistoryEntry(entryId) {
+    const entry = autoPlanHistory.find((e) => e.id === entryId);
+    if (!entry) return;
+    if (!confirm(`确定要回滚此操作吗？\n\n${entry.description}\n\n系统将恢复操作前的所有记录和路线方案状态。`)) return;
+
+    if (entry.snapshot?.records) {
+      const migrated = migrateRecords(entry.snapshot.records);
+      localStorage.setItem(appConfig.storage, JSON.stringify(migrated));
+      setRecords(migrated);
+    }
+
+    if (entry.snapshot?.routePlans) {
+      saveRoutePlans(entry.snapshot.routePlans);
+      setRoutePlans(entry.snapshot.routePlans);
+    }
+
+    const rollbackEntry = {
+      id: planUid(),
+      type: 'rollback',
+      relatedId: entryId,
+      timestamp: new Date().toISOString(),
+      description: `回滚操作：${entry.description}`,
+      affectedCount: entry.affectedCount || 0
+    };
+    const newHistory = [rollbackEntry, ...autoPlanHistory];
+    setAutoPlanHistory(newHistory);
+    saveAutoPlanHistory(newHistory);
+
+    alert('回滚成功！记录和路线方案已恢复至操作前状态。');
+  }
+
+  function openPlanItemEdit(item) {
+    setPlanEditItem(item);
+    setPlanEditForm({
+      date: item.plannedDate,
+      owner: item.owner || ''
+    });
+  }
+
+  function savePlanItemEdit() {
+    if (!planEditItem) return;
+    updatePlanItemDate(planEditItem.planId, planEditForm.date, planEditForm.owner);
+    setPlanEditItem(null);
+    setPlanEditForm({ date: '', owner: '' });
+  }
+
+  function openAutoPlanConfigModal() {
+    setTempAutoPlanConfig({ ...autoPlanConfig });
+    setShowAutoPlanConfig(true);
+  }
+
+  function saveAutoPlanConfigModal() {
+    const sanitized = {
+      ...DEFAULT_AUTO_PLAN_CONFIG,
+      ...tempAutoPlanConfig,
+      planDays: Math.max(7, Math.min(90, parseInt(tempAutoPlanConfig.planDays, 10) || 30)),
+      defaultDailyLimit: Math.max(1, Math.min(50, parseInt(tempAutoPlanConfig.defaultDailyLimit, 10) || 5))
+    };
+    if (sanitized.ownerDailyLimits && typeof sanitized.ownerDailyLimits === 'object') {
+      Object.keys(sanitized.ownerDailyLimits).forEach((owner) => {
+        sanitized.ownerDailyLimits[owner] = Math.max(1, Math.min(50, parseInt(sanitized.ownerDailyLimits[owner], 10) || sanitized.defaultDailyLimit));
+      });
+    } else {
+      sanitized.ownerDailyLimits = {};
+    }
+    setAutoPlanConfig(sanitized);
+    saveAutoPlanConfig(sanitized);
+    setShowAutoPlanConfig(false);
+  }
+
+  function togglePlanDateExpand(date) {
+    setExpandedPlanDates({ ...expandedPlanDates, [date]: !expandedPlanDates[date] });
+  }
+
+  const autoPlanSummary = useMemo(() => {
+    if (!autoPlanDraft) return null;
+    let totalOverdue = 0;
+    let totalToday = 0;
+    let totalSoon = 0;
+    const ownerSummary = {};
+    const estateSummary = {};
+
+    Object.values(autoPlanDraft.dates).forEach((items) => {
+      items.forEach((item) => {
+        if (item.daysDiff < 0) totalOverdue++;
+        else if (item.daysDiff === 0) totalToday++;
+        else {
+          const advanceDays = reminderSettings[item.cycle] || 0;
+          if (item.daysDiff <= advanceDays) totalSoon++;
+        }
+        ownerSummary[item.owner] = (ownerSummary[item.owner] || 0) + 1;
+        estateSummary[item.estate] = (estateSummary[item.estate] || 0) + 1;
+      });
+    });
+
+    const daysWithPlan = Object.keys(autoPlanDraft.dates).filter((d) => (autoPlanDraft.dates[d]?.length || 0) > 0).length;
+
+    return {
+      totalOverdue,
+      totalToday,
+      totalSoon,
+      daysWithPlan,
+      ownerSummary,
+      estateSummary,
+      topOwners: Object.entries(ownerSummary).sort((a, b) => b[1] - a[1]).slice(0, 5),
+      topEstates: Object.entries(estateSummary).sort((a, b) => b[1] - a[1]).slice(0, 5)
+    };
+  }, [autoPlanDraft, reminderSettings]);
+
   const filteredRecords = useMemo(() => {
     return records
       .filter((item) => !filters.query || `${item.estate}${item.elevatorNo}${item.owner}`.includes(filters.query))
@@ -2025,8 +2562,8 @@ function App() {
       <section className="hero">
         <div>
           <div className="eyebrow"><Building2 size={18} />{appConfig.domain}</div>
-          <h1>{routePlanningView ? '维保路线编排' : (workbenchView ? '负责人工作台' : (riskDashboardView ? '风险分级看板' : appConfig.title))}</h1>
-          <p>{routePlanningView ? '按楼盘聚合待维保设备，灵活编排每日维保路线并保存方案' : (workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : (riskDashboardView ? '汇总逾期、到期、过载与集中到期风险，点击展开查看相关记录' : appConfig.subtitle))}</p>
+          <h1>{autoPlanView ? '维保计划自动生成器' : (routePlanningView ? '维保路线编排' : (workbenchView ? '负责人工作台' : (riskDashboardView ? '风险分级看板' : appConfig.title)))}</h1>
+          <p>{autoPlanView ? '根据维保周期、负责人、楼盘分布和每日任务上限，智能生成未来30天执行计划，支持草稿编辑、确认写入和操作回滚' : (routePlanningView ? '按楼盘聚合待维保设备，灵活编排每日维保路线并保存方案' : (workbenchView ? '按负责人汇总电梯维保任务，快速掌握执行进度' : (riskDashboardView ? '汇总逾期、到期、过载与集中到期风险，点击展开查看相关记录' : appConfig.subtitle)))}</p>
         </div>
         <div className="hero-actions">
           <button className="settings-btn" onClick={() => setShowDataManager(true)} title="数据导出与恢复">
@@ -2037,21 +2574,25 @@ function App() {
             <Settings size={16} />
             提醒设置
           </button>
-          <button className={'view-switch ' + (!routePlanningView && !workbenchView && !riskDashboardView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(false); setRiskDashboardView(false); setSelectedOwner(null); }}>
+          <button className={'view-switch ' + (!routePlanningView && !workbenchView && !riskDashboardView && !autoPlanView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(false); setRiskDashboardView(false); setAutoPlanView(false); setSelectedOwner(null); }}>
             <LayoutGrid size={16} />
             路线看板
           </button>
-          <button className={'view-switch ' + (workbenchView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(true); setRiskDashboardView(false); setSelectedDate(null); }}>
+          <button className={'view-switch ' + (workbenchView ? 'active' : '')} onClick={() => { setRoutePlanningView(false); setWorkbenchView(true); setRiskDashboardView(false); setAutoPlanView(false); setSelectedDate(null); }}>
             <Users size={16} />
             负责人工作台
           </button>
-          <button className={'view-switch ' + (routePlanningView ? 'active' : '')} onClick={() => { setRoutePlanningView(true); setWorkbenchView(false); setRiskDashboardView(false); }}>
+          <button className={'view-switch ' + (routePlanningView ? 'active' : '')} onClick={() => { setRoutePlanningView(true); setWorkbenchView(false); setRiskDashboardView(false); setAutoPlanView(false); }}>
             <Route size={16} />
             路线编排
           </button>
-          <button className={'view-switch ' + (riskDashboardView ? 'active' : '')} onClick={() => { setRiskDashboardView(true); setWorkbenchView(false); setRoutePlanningView(false); }}>
+          <button className={'view-switch ' + (riskDashboardView ? 'active' : '')} onClick={() => { setRiskDashboardView(true); setWorkbenchView(false); setRoutePlanningView(false); setAutoPlanView(false); }}>
             <ShieldAlert size={16} />
             风险看板
+          </button>
+          <button className={'view-switch ' + (autoPlanView ? 'active' : '')} onClick={() => { setAutoPlanView(true); setRiskDashboardView(false); setWorkbenchView(false); setRoutePlanningView(false); }}>
+            <Zap size={16} />
+            计划生成器
           </button>
         </div>
       </section>
@@ -2995,6 +3536,197 @@ function App() {
         </div>
       )}
 
+      {showAutoPlanConfig && (
+        <div className="modal-overlay" onClick={() => setShowAutoPlanConfig(false)}>
+          <div className="modal-panel auto-plan-config-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <Settings size={18} />
+                <h2>生成器配置</h2>
+              </div>
+              <button className="modal-close" onClick={() => setShowAutoPlanConfig(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p className="hint">调整智能计划生成器的参数，生成新计划时将使用这些配置。</p>
+
+            <div className="config-form">
+              <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                <label>
+                  <span><CalendarDays size={14} /> 计划天数</span>
+                  <input
+                    type="number"
+                    min="7"
+                    max="90"
+                    value={tempAutoPlanConfig.planDays}
+                    onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, planDays: e.target.value })}
+                  />
+                  <span className="hint" style={{ marginTop: 4 }}>范围 7~90 天（默认30天）</span>
+                </label>
+                <label>
+                  <span><User size={14} /> 默认每日任务上限</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="50"
+                    value={tempAutoPlanConfig.defaultDailyLimit}
+                    onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, defaultDailyLimit: e.target.value })}
+                  />
+                  <span className="hint" style={{ marginTop: 4 }}>每位负责人每日最多处理台数</span>
+                </label>
+              </div>
+
+              <div className="config-toggles">
+                <label className="config-toggle">
+                  <input
+                    type="checkbox"
+                    checked={tempAutoPlanConfig.estateConcentration}
+                    onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, estateConcentration: e.target.checked })}
+                  />
+                  <div>
+                    <strong>楼盘集中优化</strong>
+                    <p>同一楼盘的设备尽量安排在同一天，减少路途损耗</p>
+                  </div>
+                </label>
+                <label className="config-toggle">
+                  <input
+                    type="checkbox"
+                    checked={tempAutoPlanConfig.priorityOverdue}
+                    onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, priorityOverdue: e.target.checked })}
+                  />
+                  <div>
+                    <strong>逾期优先安排</strong>
+                    <p>已逾期设备将获得最高优先级，尽量安排在最近日期</p>
+                  </div>
+                </label>
+                <label className="config-toggle">
+                  <input
+                    type="checkbox"
+                    checked={tempAutoPlanConfig.prioritySoon}
+                    onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, prioritySoon: e.target.checked })}
+                  />
+                  <div>
+                    <strong>临近到期优先</strong>
+                    <p>临近维保日期的设备优先安排，避免逾期</p>
+                  </div>
+                </label>
+              </div>
+
+              <div className="owner-limits-section">
+                <div className="panel-title" style={{ marginBottom: 10 }}>
+                  <Users size={16} />
+                  <h3>负责人个性化上限（可选）</h3>
+                </div>
+                <p className="hint" style={{ marginTop: 0 }}>为特定负责人设置单独的每日任务上限，留空则使用默认值。</p>
+                <div className="owner-limits-grid">
+                  {(() => {
+                    const uniqueOwners = [...new Set(records.map(r => r.owner).filter(Boolean))];
+                    return uniqueOwners.map((owner) => (
+                      <label key={owner} className="owner-limit-item">
+                        <span className="owner-limit-name"><User size={12} /> {owner}</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="50"
+                          placeholder={`默认：${tempAutoPlanConfig.defaultDailyLimit}`}
+                          value={tempAutoPlanConfig.ownerDailyLimits?.[owner] ?? ''}
+                          onChange={(e) => {
+                            const newLimits = { ...(tempAutoPlanConfig.ownerDailyLimits || {}) };
+                            if (e.target.value) {
+                              newLimits[owner] = e.target.value;
+                            } else {
+                              delete newLimits[owner];
+                            }
+                            setTempAutoPlanConfig({ ...tempAutoPlanConfig, ownerDailyLimits: newLimits });
+                          }}
+                        />
+                        <span className="setting-unit">台/天</span>
+                      </label>
+                    ));
+                  })()}
+                  {[...new Set(records.map(r => r.owner).filter(Boolean))].length === 0 && (
+                    <p className="empty">暂无负责人记录，请先添加包含负责人的维保记录。</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-btn" onClick={() => setShowAutoPlanConfig(false)}>取消</button>
+              <button type="button" className="primary" onClick={saveAutoPlanConfigModal}>
+                <Save size={16} />
+                保存配置
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {planEditItem && (
+        <div className="modal-overlay" onClick={() => { setPlanEditItem(null); setPlanEditForm({ date: '', owner: '' }); }}>
+          <div className="modal-panel plan-edit-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <Settings size={18} />
+                <h2>调整计划安排</h2>
+              </div>
+              <button className="modal-close" onClick={() => { setPlanEditItem(null); setPlanEditForm({ date: '', owner: '' }); }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="plan-edit-device">
+              <strong>{planEditItem.estate} {planEditItem.building}</strong>
+              <p>{planEditItem.elevatorNo} · {planEditItem.cycle} · 原定日期：{planEditItem.originalNextDate}</p>
+              {planEditItem.daysDiff < 0 && (
+                <div className="reminder-tag reminder-overdue">
+                  <AlertTriangle size={12} /> 已逾期 {Math.abs(planEditItem.daysDiff)} 天
+                </div>
+              )}
+            </div>
+
+            <div className="form-grid" style={{ gridTemplateColumns: '1fr' }}>
+              <label>
+                <span><Calendar size={14} /> 计划维保日期</span>
+                <input
+                  type="date"
+                  value={planEditForm.date}
+                  min={today}
+                  onChange={(e) => setPlanEditForm({ ...planEditForm, date: e.target.value })}
+                />
+              </label>
+              <label>
+                <span><User size={14} /> 负责人</span>
+                <select
+                  value={planEditForm.owner}
+                  onChange={(e) => setPlanEditForm({ ...planEditForm, owner: e.target.value })}
+                >
+                  <option value="">（不修改）</option>
+                  {[...new Set(records.map(r => r.owner).filter(Boolean))].map((owner) => (
+                    <option key={owner} value={owner}>{owner}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <p className="hint">调整后设备将重新归类到对应日期的计划中，系统不会检查上限，请合理安排。</p>
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-btn" onClick={() => { setPlanEditItem(null); setPlanEditForm({ date: '', owner: '' }); }}>取消</button>
+              <button
+                type="button"
+                className="primary"
+                onClick={savePlanItemEdit}
+                disabled={!planEditForm.date}
+              >
+                <CheckCircle2 size={16} />
+                确认调整
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showImportModal && (
         <div className="modal-overlay" onClick={() => { setShowImportModal(false); setParsedImport(null); }}>
           <div className="modal-panel import-modal" onClick={(e) => e.stopPropagation()}>
@@ -3627,6 +4359,355 @@ function App() {
               })
             )}
           </div>
+        </section>
+      ) : autoPlanView ? (
+        <section className="auto-plan-view">
+          <div className="panel auto-plan-controls">
+            <div className="panel-title-with-actions">
+              <div className="panel-title">
+                <Zap size={18} />
+                <h2>智能计划生成器</h2>
+              </div>
+              <div className="auto-plan-actions">
+                <button className="secondary-btn small-btn" onClick={openAutoPlanConfigModal}>
+                  <Settings size={14} />
+                  生成配置
+                </button>
+                {autoPlanDraft && (
+                  <>
+                    <button className="secondary-btn small-btn" onClick={() => generateAutoPlan()}>
+                      <RefreshCw size={14} />
+                      重新生成
+                    </button>
+                    <button className="secondary-btn small-btn danger-btn" onClick={discardPlanDraft}>
+                      <Trash2 size={14} />
+                      放弃草稿
+                    </button>
+                    <button className="primary small-btn confirm-plan-btn" onClick={confirmAutoPlan}>
+                      <CheckCircle2 size={14} />
+                      确认并提交计划
+                    </button>
+                  </>
+                )}
+                {!autoPlanDraft && (
+                  <button className="primary small-btn" onClick={() => generateAutoPlan()}>
+                    <Zap size={14} />
+                    生成计划
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="auto-plan-config-summary">
+              <div className="config-tag">
+                <CalendarDays size={14} />
+                计划天数：{autoPlanConfig.planDays} 天
+              </div>
+              <div className="config-tag">
+                <User size={14} />
+                每人每日上限：{autoPlanConfig.defaultDailyLimit} 台
+              </div>
+              <div className="config-tag">
+                <Building size={14} />
+                楼盘集中：{autoPlanConfig.estateConcentration ? '开启' : '关闭'}
+              </div>
+              <div className="config-tag">
+                <AlertTriangle size={14} />
+                逾期优先：{autoPlanConfig.priorityOverdue ? '开启' : '关闭'}
+              </div>
+            </div>
+          </div>
+
+          {!autoPlanDraft ? (
+            <div className="panel auto-plan-empty">
+              <div className="auto-plan-empty-inner">
+                <Zap size={56} />
+                <h3>尚未生成计划</h3>
+                <p>点击「生成计划」按钮，系统将根据以下规则智能生成维保计划：</p>
+                <ul className="auto-plan-rules">
+                  <li><AlertOctagon size={16} /> 优先安排<strong>逾期</strong>和<strong>临近到期</strong>的设备</li>
+                  <li><Building size={16} /> <strong>同一楼盘</strong>的设备尽量集中在同一天，减少路途消耗</li>
+                  <li><UserX size={16} /> 每位负责人<strong>每日任务不超过</strong>配置的上限</li>
+                  <li><CheckCircle2 size={16} /> 自动<strong>排除已完成</strong>的维保记录</li>
+                  <li><ClipboardList size={16} /> 生成结果为<strong>可编辑草稿</strong>，确认后才写入记录</li>
+                  <li><RotateCcw size={16} /> 所有操作保留<strong>历史记录</strong>，支持一键回滚</li>
+                </ul>
+              </div>
+            </div>
+          ) : (
+            <>
+              {autoPlanSummary && (
+                <section className="auto-plan-metrics">
+                  <article className="metric auto-metric">
+                    <div className="metric-icon-wrap overdue-icon"><AlertOctagon size={20} /></div>
+                    <div>
+                      <span>逾期设备</span>
+                      <strong>{autoPlanSummary.totalOverdue}</strong>
+                    </div>
+                  </article>
+                  <article className="metric auto-metric">
+                    <div className="metric-icon-wrap today-icon"><Clock size={20} /></div>
+                    <div>
+                      <span>今日到期</span>
+                      <strong>{autoPlanSummary.totalToday}</strong>
+                    </div>
+                  </article>
+                  <article className="metric auto-metric">
+                    <div className="metric-icon-wrap soon-icon"><Bell size={20} /></div>
+                    <div>
+                      <span>即将到期</span>
+                      <strong>{autoPlanSummary.totalSoon}</strong>
+                    </div>
+                  </article>
+                  <article className="metric auto-metric">
+                    <div className="metric-icon-wrap days-icon"><CalendarDays size={20} /></div>
+                    <div>
+                      <span>覆盖天数</span>
+                      <strong>{autoPlanSummary.daysWithPlan}</strong>
+                    </div>
+                  </article>
+                  <article className="metric auto-metric">
+                    <div className="metric-icon-wrap total-icon"><ClipboardList size={20} /></div>
+                    <div>
+                      <span>总计划数</span>
+                      <strong>{autoPlanDraft.totalCount}</strong>
+                    </div>
+                  </article>
+                </section>
+              )}
+
+              <div className="auto-plan-layout">
+                <section className="panel auto-plan-dates-panel">
+                  <div className="panel-title-with-actions">
+                    <div className="panel-title">
+                      <Calendar size={18} />
+                      <h2>计划日历（{autoPlanDraft.config.planDays}天）</h2>
+                    </div>
+                  </div>
+                  <div className="auto-plan-dates-list">
+                    {(autoPlanDraft.dateList || []).map((date, idx) => {
+                      const items = autoPlanDraft.dates[date] || [];
+                      const d = new Date(date);
+                      const isToday = date === today;
+                      const weekday = weekdayLabels[(d.getDay() + 6) % 7];
+                      const isExpanded = expandedPlanDates[date] !== false;
+                      const overdueCount = items.filter((it) => it.daysDiff < 0).length;
+                      const ownerCounts = {};
+                      items.forEach((it) => {
+                        ownerCounts[it.owner] = (ownerCounts[it.owner] || 0) + 1;
+                      });
+                      return (
+                        <div key={date} className={'auto-plan-date-card ' + (isToday ? 'is-today' : '') + (items.length > 0 ? ' has-items' : '')}>
+                          <div className="auto-plan-date-header" onClick={() => togglePlanDateExpand(date)}>
+                            <div className="auto-plan-date-info">
+                              <div className="auto-plan-date-weekday">{weekday}</div>
+                              <div className="auto-plan-date-main">
+                                <strong>{d.getMonth() + 1}月{d.getDate()}日</strong>
+                                {isToday && <span className="today-badge">今日</span>}
+                              </div>
+                            </div>
+                            <div className="auto-plan-date-counts">
+                              <span className="count-badge total">{items.length} 台</span>
+                              {overdueCount > 0 && <span className="count-badge overdue">逾期 {overdueCount}</span>}
+                            </div>
+                            <ChevronDown size={18} className={'chevron-icon ' + (isExpanded ? 'expanded' : '')} />
+                          </div>
+                          {isExpanded && items.length > 0 && (
+                            <div className="auto-plan-items">
+                              <div className="auto-plan-owner-counts">
+                                {Object.entries(ownerCounts).map(([owner, count]) => (
+                                  <span key={owner} className="owner-count-tag">
+                                    <User size={12} />
+                                    {owner}: {count}台
+                                    {count > getOwnerDailyLimit(owner, autoPlanDraft.config) && (
+                                      <AlertTriangle size={12} className="warn-icon" title="超出每日上限" />
+                                    )}
+                                  </span>
+                                ))}
+                              </div>
+                              {items.map((item) => {
+                                const isOverdue = item.daysDiff < 0;
+                                const isTodayDue = item.daysDiff === 0;
+                                const rs = { type: 'none', label: '' };
+                                if (isOverdue) rs.type = 'overdue';
+                                else if (isTodayDue) rs.type = 'today';
+                                else {
+                                  const advanceDays = reminderSettings[item.cycle] || 0;
+                                  if (item.daysDiff <= advanceDays) rs.type = 'soon';
+                                }
+                                let diffLabel = '';
+                                if (isOverdue) diffLabel = `逾期${Math.abs(item.daysDiff)}天`;
+                                else if (isTodayDue) diffLabel = '今日到期';
+                                else diffLabel = `+${item.daysDiff}天`;
+                                return (
+                                  <div key={item.planId} className={'auto-plan-item ' + reminderStatusClass(rs.type)}>
+                                    <div className="auto-plan-item-main">
+                                      <div className="auto-plan-item-head">
+                                        <h4>{item.estate} {item.building}</h4>
+                                        <div className="auto-plan-item-tags">
+                                          {isOverdue && <span className="diff-tag overdue">{diffLabel}</span>}
+                                          {isTodayDue && <span className="diff-tag today">{diffLabel}</span>}
+                                          {!isOverdue && !isTodayDue && item.daysDiff > 0 && <span className="diff-tag soon">{diffLabel}</span>}
+                                          {item.originalNextDate !== item.plannedDate && (
+                                            <span className="diff-tag moved" title={`原计划：${item.originalNextDate}`}>
+                                              <RotateCcw size={10} />
+                                              调整日期
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                      <p>{item.elevatorNo} · {item.cycle} · <User size={12} /> {item.owner}</p>
+                                      <p className="auto-plan-item-original">原定日期：{item.originalNextDate} → 计划：{item.plannedDate}</p>
+                                    </div>
+                                    <div className="auto-plan-item-actions">
+                                      <button className="small-icon-btn" onClick={() => openPlanItemEdit(item)} title="调整计划">
+                                        <Settings size={14} />
+                                      </button>
+                                      <button className="small-icon-btn ghost-danger" onClick={() => removePlanItem(item.planId)} title="从计划移除">
+                                        <X size={14} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {isExpanded && items.length === 0 && (
+                            <div className="auto-plan-empty-day">
+                              <p>当日暂无计划安排</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="panel auto-plan-side-panel">
+                  <div className="auto-plan-side-section">
+                    <div className="panel-title">
+                      <Users size={16} />
+                      <h3>负责人负荷</h3>
+                    </div>
+                    {autoPlanSummary && autoPlanSummary.topOwners.length > 0 ? (
+                      <div className="owner-load-list">
+                        {autoPlanSummary.topOwners.map(([owner, count]) => {
+                          const limit = getOwnerDailyLimit(owner, autoPlanDraft.config);
+                          const avgPerDay = (count / autoPlanSummary.daysWithPlan).toFixed(1);
+                          return (
+                            <div key={owner} className="owner-load-item">
+                              <div className="owner-load-head">
+                                <span className="owner-load-name"><User size={14} /> {owner}</span>
+                                <span className="owner-load-count">{count} 台</span>
+                              </div>
+                              <div className="owner-load-bar-wrap">
+                                <div
+                                  className="owner-load-bar"
+                                  style={{
+                                    width: `${Math.min(100, (count / (autoPlanConfig.planDays * limit)) * 100 * 3)}%`
+                                  }}
+                                />
+                              </div>
+                              <div className="owner-load-meta">
+                                <span>日均 {avgPerDay} 台</span>
+                                <span>上限 {limit} 台/天</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="empty">暂无负责人数据</p>
+                    )}
+                  </div>
+
+                  <div className="auto-plan-side-section">
+                    <div className="panel-title">
+                      <Building size={16} />
+                      <h3>楼盘分布 TOP5</h3>
+                    </div>
+                    {autoPlanSummary && autoPlanSummary.topEstates.length > 0 ? (
+                      <div className="estate-load-list">
+                        {autoPlanSummary.topEstates.map(([estate, count]) => (
+                          <div key={estate} className="estate-load-item">
+                            <div className="estate-load-head">
+                              <span className="estate-load-name"><Building2 size={14} /> {estate}</span>
+                              <span className="estate-load-count">{count} 台</span>
+                            </div>
+                            <div className="estate-load-bar-wrap">
+                              <div
+                                className="estate-load-bar"
+                                style={{
+                                  width: `${Math.min(100, (count / autoPlanDraft.totalCount) * 100 * 2)}%`
+                                }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="empty">暂无楼盘数据</p>
+                    )}
+                  </div>
+
+                  {autoPlanDraft.unassignedItems && autoPlanDraft.unassignedItems.length > 0 && (
+                    <div className="auto-plan-side-section">
+                      <div className="panel-title">
+                        <AlertTriangle size={16} />
+                        <h3>未能安排（{autoPlanDraft.unassignedItems.length}台）</h3>
+                      </div>
+                      <div className="unassigned-list">
+                        {autoPlanDraft.unassignedItems.map((item, idx) => (
+                          <div key={idx} className="unassigned-item">
+                            <div>
+                              <strong>{item.estate} {item.building}</strong>
+                              <p>{item.elevatorNo} · {item.owner}</p>
+                            </div>
+                            <span className={'diff-tag ' + (item.daysDiff < 0 ? 'overdue' : 'soon')}>
+                              {item.daysDiff < 0 ? `逾期${Math.abs(item.daysDiff)}天` : `+${item.daysDiff}天`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="auto-plan-side-section">
+                    <div className="panel-title">
+                      <RotateCcw size={16} />
+                      <h3>操作历史</h3>
+                    </div>
+                    {autoPlanHistory.length > 0 ? (
+                      <div className="plan-history-list">
+                        {autoPlanHistory.slice(0, 10).map((entry) => (
+                          <div key={entry.id} className={'plan-history-item history-' + entry.type}>
+                            <div className="plan-history-head">
+                              <span className={'history-type-badge type-' + entry.type}>
+                                {entry.type === 'confirm' && <CheckCircle2 size={12} />}
+                                {entry.type === 'rollback' && <RotateCcw size={12} />}
+                                {entry.type === 'confirm' ? '确认计划' : '回滚操作'}
+                              </span>
+                              <span className="history-time">
+                                {new Date(entry.timestamp).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                            <p className="history-desc">{entry.description}</p>
+                            {entry.type === 'confirm' && entry.snapshot && (
+                              <button className="rollback-btn" onClick={() => rollbackHistoryEntry(entry.id)}>
+                                <RotateCcw size={12} />
+                                回滚此操作
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="empty">暂无操作历史</p>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </>
+          )}
         </section>
       ) : (
         <>
