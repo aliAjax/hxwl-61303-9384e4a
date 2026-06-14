@@ -194,7 +194,9 @@ const DEFAULT_AUTO_PLAN_CONFIG = {
   ownerDailyLimits: {},
   estateConcentration: true,
   priorityOverdue: true,
-  prioritySoon: true
+  prioritySoon: true,
+  allowAdvanceScheduling: false,
+  maxAdvanceDays: 0
 };
 
 function loadAutoPlanDraft() {
@@ -1806,6 +1808,12 @@ function App() {
       if (!item.nextDate) return false;
       if (recordsInRoutePlans.has(item.id)) return false;
       const diff = daysBetween(item.nextDate, today);
+
+      const advanceDays = config.allowAdvanceScheduling
+        ? Math.max(0, config.maxAdvanceDays || 0)
+        : 0;
+      const minDateIdx = diff < 0 ? 0 : Math.max(0, diff - advanceDays);
+      if (minDateIdx >= planDays) return false;
       if (diff > planDays - 1) return false;
       return true;
     });
@@ -1843,7 +1851,13 @@ function App() {
 
     function findBestDateAndOwner(scoredItem, preferredStartIdx = 0) {
       const { record, diff, owner: defaultOwner } = scoredItem;
-      const minDateIdx = Math.max(0, Math.min(0, diff < 0 ? 0 : diff));
+
+      const advanceDays = config.allowAdvanceScheduling
+        ? Math.max(0, config.maxAdvanceDays || 0)
+        : 0;
+      const minDateIdx = diff < 0
+        ? Math.max(0, preferredStartIdx)
+        : Math.max(0, preferredStartIdx, diff - advanceDays);
 
       let bestDateIdx = -1;
       let bestOwner = defaultOwner;
@@ -3685,6 +3699,34 @@ function App() {
                     <p>临近维保日期的设备优先安排，避免逾期</p>
                   </div>
                 </label>
+                <label className="config-toggle">
+                  <input
+                    type="checkbox"
+                    checked={tempAutoPlanConfig.allowAdvanceScheduling}
+                    onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, allowAdvanceScheduling: e.target.checked })}
+                  />
+                  <div>
+                    <strong>允许提前排期</strong>
+                    <p>关闭时，设备只能在到期日或之后安排；开启时可设置最大提前天数</p>
+                  </div>
+                </label>
+                {tempAutoPlanConfig.allowAdvanceScheduling && (
+                  <label className="config-toggle config-toggle-with-input">
+                    <div>
+                      <strong>最大提前天数</strong>
+                      <p>设备最多可提前几天安排（0表示仅到期日当天及之后）</p>
+                      <input
+                        type="number"
+                        min="0"
+                        max="30"
+                        value={tempAutoPlanConfig.maxAdvanceDays ?? 0}
+                        onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, maxAdvanceDays: Math.max(0, parseInt(e.target.value) || 0) })}
+                        style={{ marginTop: 6, width: 100 }}
+                      />
+                      <span className="setting-unit" style={{ marginLeft: 6 }}>天</span>
+                    </div>
+                  </label>
+                )}
               </div>
 
               <div className="owner-limits-section">
