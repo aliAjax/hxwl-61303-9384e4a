@@ -1089,6 +1089,7 @@ function App() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [importText, setImportText] = useState('');
   const [parsedImport, setParsedImport] = useState(null);
+  const [importMeta, setImportMeta] = useState({ fieldMapping: null, hasHeader: false, headerCells: null });
   const [routePlanningView, setRoutePlanningView] = useState(false);
   const [routePlans, setRoutePlans] = useState(loadRoutePlans);
   const [selectedRouteDate, setSelectedRouteDate] = useState(today);
@@ -1328,36 +1329,98 @@ function App() {
     setBackfillForm({ completedAt: '', executor: '', notes: '', nextDate: '' });
   }
 
-  function parseImportText(text) {
-    const lines = text.trim().split('\n').filter(line => line.trim());
-    const records = [];
-    lines.forEach((line, lineIndex) => {
-      const trimmed = line.trim();
-      let parts;
-      if (trimmed.includes('\t')) {
-        parts = trimmed.split('\t');
-      } else if (trimmed.includes('，')) {
-        parts = trimmed.split('，');
-      } else if (trimmed.includes(',')) {
-        parts = trimmed.split(',');
-      } else {
-        parts = trimmed.split(/\s+/);
-      }
-      parts = parts.map(p => p.trim());
-      const [estate, building, elevatorNo, cycle, nextDate, owner] = parts;
-      records.push({
-        lineIndex,
-        rawLine: trimmed,
-        estate: estate || '',
-        building: building || '',
-        elevatorNo: elevatorNo || '',
-        cycle: cycle || '',
-        nextDate: nextDate || '',
-        owner: owner || '',
-        errors: []
-      });
+  function splitLineByMixedDelimiters(line) {
+    return line
+      .split(/[\t，,\s]+/)
+      .map(p => p.trim())
+      .filter(p => p !== '');
+  }
+
+  function detectFieldMapping(headerCells) {
+    const labelToKey = {};
+    appConfig.fields.forEach(f => {
+      labelToKey[f.label] = f.key;
     });
-    return records;
+    const mapping = {};
+    headerCells.forEach((cell, idx) => {
+      const normalized = cell.trim();
+      if (labelToKey[normalized]) {
+        mapping[idx] = labelToKey[normalized];
+      }
+    });
+    return mapping;
+  }
+
+  function isHeaderLine(cells) {
+    const labelSet = new Set(appConfig.fields.map(f => f.label));
+    const keySet = new Set(appConfig.fields.map(f => f.key));
+    let matchCount = 0;
+    cells.forEach(cell => {
+      const normalized = cell.trim();
+      if (labelSet.has(normalized) || keySet.has(normalized)) {
+        matchCount++;
+      }
+    });
+    return matchCount >= 2;
+  }
+
+  function parseImportText(text) {
+    const rawLines = text.split('\n');
+    const nonEmptyLines = rawLines
+      .map((line, originalIdx) => ({ line: line.trim(), originalIdx }))
+      .filter(item => item.line !== '');
+
+    if (nonEmptyLines.length === 0) {
+      return { records: [], fieldMapping: null, hasHeader: false };
+    }
+
+    const firstLineCells = splitLineByMixedDelimiters(nonEmptyLines[0].line);
+    const hasHeader = isHeaderLine(firstLineCells);
+    let fieldMapping = null;
+    let dataStartIndex = 0;
+
+    if (hasHeader) {
+      fieldMapping = detectFieldMapping(firstLineCells);
+      dataStartIndex = 1;
+    }
+
+    const records = [];
+    const defaultOrder = ['estate', 'building', 'elevatorNo', 'cycle', 'nextDate', 'owner'];
+
+    for (let i = dataStartIndex; i < nonEmptyLines.length; i++) {
+      const { line, originalIdx } = nonEmptyLines[i];
+      const cells = splitLineByMixedDelimiters(line);
+      const record = {
+        lineIndex: originalIdx,
+        rawLine: line,
+        estate: '',
+        building: '',
+        elevatorNo: '',
+        cycle: '',
+        nextDate: '',
+        owner: '',
+        errors: []
+      };
+
+      if (hasHeader && fieldMapping) {
+        cells.forEach((cell, idx) => {
+          const key = fieldMapping[idx];
+          if (key && record.hasOwnProperty(key)) {
+            record[key] = cell;
+          }
+        });
+      } else {
+        defaultOrder.forEach((key, idx) => {
+          if (cells[idx]) {
+            record[key] = cells[idx];
+          }
+        });
+      }
+
+      records.push(record);
+    }
+
+    return { records, fieldMapping, hasHeader, headerCells: hasHeader ? firstLineCells : null };
   }
 
   function validateImportRecords(parsedRecords) {
@@ -1407,9 +1470,10 @@ function App() {
   }
 
   function handleImportPreview() {
-    const parsed = parseImportText(importText);
-    const validated = validateImportRecords(parsed);
+    const { records, fieldMapping, hasHeader, headerCells } = parseImportText(importText);
+    const validated = validateImportRecords(records);
     setParsedImport(validated);
+    setImportMeta({ fieldMapping, hasHeader, headerCells });
   }
 
   function handleConfirmImport() {
@@ -1434,6 +1498,7 @@ function App() {
     setShowImportModal(false);
     setImportText('');
     setParsedImport(null);
+    setImportMeta({ fieldMapping: null, hasHeader: false, headerCells: null });
   }
 
   function recordsChanged(prev, next) {
@@ -4005,19 +4070,19 @@ function App() {
       )}
 
       {showImportModal && (
-        <div className="modal-overlay" onClick={() => { setShowImportModal(false); setParsedImport(null); }}>
+        <div className="modal-overlay" onClick={() => { setShowImportModal(false); setParsedImport(null); setImportMeta({ fieldMapping: null, hasHeader: false, headerCells: null }); }}>
           <div className="modal-panel import-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div className="panel-title">
                 <Upload size={18} />
                 <h2>批量导入预检</h2>
               </div>
-              <button className="modal-close" onClick={() => { setShowImportModal(false); setParsedImport(null); }}>
+              <button className="modal-close" onClick={() => { setShowImportModal(false); setParsedImport(null); setImportMeta({ fieldMapping: null, hasHeader: false, headerCells: null }); }}>
                 <X size={18} />
               </button>
             </div>
             <p className="hint">
-              粘贴多行电梯维保数据，支持制表符、逗号、空格分隔。字段顺序：楼盘、楼栋、电梯编号、维保周期、下次维保日期、负责人。
+              粘贴多行电梯维保数据，支持制表符、英文逗号、中文逗号、空格及混合分隔，自动跳过空行。可首行带表头（楼盘、楼栋、电梯编号、维保周期、下次维保日期、负责人），无表头时按默认顺序解析。
             </p>
 
             <label className="import-label">
@@ -4026,7 +4091,7 @@ function App() {
                 className="import-textarea"
                 value={importText}
                 onChange={(e) => setImportText(e.target.value)}
-                placeholder="星河湾 3栋 E-032 15天 2026-06-13 赵师傅&#10;海棠府 1栋 E-118 15天 2026-06-12 钱师傅"
+                placeholder="楼盘,楼栋,电梯编号,维保周期,下次维保日期,负责人&#10;星河湾,3栋,E-032,15天,2026-06-13,赵师傅&#10;海棠府 1栋 E-118 15天 2026-06-12 钱师傅"
                 rows={6}
               />
             </label>
@@ -4053,11 +4118,53 @@ function App() {
                   </div>
                 </div>
 
+                <div className="import-field-mapping">
+                  <div className="import-mapping-title">
+                    <Database size={14} />
+                    <span>字段映射</span>
+                    {importMeta.hasHeader ? (
+                      <span className="import-mapping-badge success">已识别表头</span>
+                    ) : (
+                      <span className="import-mapping-badge">按默认顺序</span>
+                    )}
+                  </div>
+                  <div className="import-mapping-list">
+                    {(() => {
+                      const keyToLabel = {};
+                      appConfig.fields.forEach(f => { keyToLabel[f.key] = f.label; });
+                      const defaultOrder = ['estate', 'building', 'elevatorNo', 'cycle', 'nextDate', 'owner'];
+                      if (importMeta.hasHeader && importMeta.fieldMapping && importMeta.headerCells) {
+                        return importMeta.headerCells.map((cell, idx) => {
+                          const mappedKey = importMeta.fieldMapping[idx];
+                          const mappedLabel = mappedKey ? keyToLabel[mappedKey] : null;
+                          return (
+                            <div key={idx} className={'import-mapping-item ' + (mappedLabel ? 'mapped' : 'unmapped')}>
+                              <span className="import-mapping-source">「{cell}」</span>
+                              <span className="import-mapping-arrow">→</span>
+                              <span className="import-mapping-target">
+                                {mappedLabel || <em>未识别字段</em>}
+                              </span>
+                            </div>
+                          );
+                        });
+                      } else {
+                        return defaultOrder.map((key, idx) => (
+                          <div key={key} className="import-mapping-item mapped">
+                            <span className="import-mapping-source">第{idx + 1}列</span>
+                            <span className="import-mapping-arrow">→</span>
+                            <span className="import-mapping-target">{keyToLabel[key]}</span>
+                          </div>
+                        ));
+                      }
+                    })()}
+                  </div>
+                </div>
+
                 <div className="import-preview-list">
                   {parsedImport.map((record, index) => (
                     <div key={index} className={'import-preview-item ' + (record.errors.length > 0 ? 'has-error' : 'is-valid')}>
                       <div className="import-preview-head">
-                        <span className="import-line-no">第 {index + 1} 行</span>
+                        <span className="import-line-no">第 {record.lineIndex + 1} 行</span>
                         {record.errors.length > 0 ? (
                           <span className="import-status error">
                             <XCircle size={14} />
@@ -4129,7 +4236,7 @@ function App() {
             )}
 
             <div className="modal-actions">
-              <button type="button" className="secondary-btn" onClick={() => { setShowImportModal(false); setParsedImport(null); }}>取消</button>
+              <button type="button" className="secondary-btn" onClick={() => { setShowImportModal(false); setParsedImport(null); setImportMeta({ fieldMapping: null, hasHeader: false, headerCells: null }); }}>取消</button>
               <button
                 type="button"
                 className="primary"
