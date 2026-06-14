@@ -4570,3 +4570,287 @@ button.primary.danger:disabled {
     font-size: 12px;
   }
 }
+
+.print-export-modal {
+  max-width: 1100px;
+  width: 92vw;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+.print-export-modal .modal-header {
+  padding: 18px 22px;
+  border-bottom: 1px solid #f1f5f9;
+  flex-shrink: 0;
+}
+
+.print-export-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 22px;
+  border-bottom: 1px solid #f1f5f9;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  background: #fafbfc;
+}
+
+.print-date-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #344054;
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+
+.print-date-info strong {
+  color: #111827;
+  font-weight: 600;
+}
+
+.print-date-info .sep {
+  color: #d0d5dd;
+  margin: 0 2px;
+}
+
+.print-export-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.print-export-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  width: auto;
+  margin-top: 0;
+}
+
+.print-preview-area {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+  background: #eef0f3;
+}
+
+.empty-print-preview {
+  display: grid;
+  place-content: center;
+  place-items: center;
+  gap: 12px;
+  padding: 80px 20px;
+  color: #667085;
+  background: #fff;
+  border-radius: 8px;
+}
+
+.empty-print-preview p {
+  font-size: 14px;
+}
+
+.print-page {
+  background: #fff;
+  padding: 32px;
+  border-radius: 6px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.print-page-title {
+  text-align: center;
+  font-size: 24px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: #111827;
+}
+
+.print-page-subtitle {
+  text-align: center;
+  color: #5b6474;
+  margin-bottom: 24px;
+  font-size: 14px;
+}
+
+.print-summary {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border-radius: 6px;
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+
+.print-summary-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  color: #344054;
+}
+
+.print-summary-item strong {
+  font-size: 18px;
+  color: #2563eb;
+  font-weight: 700;
+}
+
+.print-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.print-table th,
+.print-table td {
+  border: 1px solid #d0d5dd;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.print-table th {
+  background: #f2f4f7;
+  font-weight: 700;
+  color: #111827;
+}
+
+.print-col-order {
+  width: 50px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.print-col-elevator {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.print-col-signature {
+  width: 120px;
+  min-height: 32px;
+}
+
+.print-col-note {
+  min-width: 140px;
+  min-height: 36px;
+}
+
+.print-route-group-header td {
+  background: #eef2ff;
+  font-weight: 600;
+  color: #1e1b4b;
+}
+
+.print-route-badge {
+  display: inline-block;
+  background: #2563eb;
+  color: #fff;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  margin-right: 10px;
+  font-weight: 500;
+}
+
+.print-route-count {
+  margin-left: 12px;
+  color: #667085;
+  font-weight: 400;
+  font-size: 12px;
+}
+
+.print-col-risk.risk-overdue {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.print-col-risk.risk-today {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.print-col-risk.risk-soon {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.print-footer {
+  margin-top: 24px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #667085;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.print-modal-overlay .print-export-modal {
+  animation: slideUp 0.2s ease-out;
+}
+
+@media print {
+  .no-print,
+  .hero,
+  .metrics,
+  .route-planning,
+  .workbench,
+  .risk-dashboard,
+  .calendar-view,
+  .auto-plan-view,
+  .show-data-manager,
+  .shell > section:not(.print-preview-section),
+  .modal-overlay:not(.print-modal-overlay) {
+    display: none !important;
+  }
+
+  body {
+    background: #fff !important;
+  }
+
+  .shell {
+    width: 100%;
+    padding: 0;
+    margin: 0;
+  }
+
+  .print-export-modal {
+    position: static !important;
+    transform: none !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    max-height: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+
+  .print-preview-area {
+    padding: 0;
+    background: #fff;
+    overflow: visible;
+  }
+
+  .print-page {
+    padding: 0;
+    border-radius: 0;
+    box-shadow: none;
+    max-width: 100%;
+  }
+
+  .print-table {
+    font-size: 12px;
+  }
+
+  .print-table th,
+  .print-table td {
+    padding: 6px 8px;
+  }
+}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown, ShieldAlert, AlertOctagon, Clock, UserX, Building, Download, HardDrive, Database, RefreshCw, FileJson } from 'lucide-react';
+import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown, ShieldAlert, AlertOctagon, Clock, UserX, Building, Download, HardDrive, Database, RefreshCw, FileJson, Printer, FileSpreadsheet } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -1133,6 +1133,7 @@ function App() {
   const [estateInputValue, setEstateInputValue] = useState('');
   const [ownerInputValue, setOwnerInputValue] = useState('');
   const [calendarFilters, setCalendarFilters] = useState({ owner: '全部', cycle: '全部' });
+  const [showPrintExportModal, setShowPrintExportModal] = useState(false);
 
   const estateMetadata = useMemo(() => {
     const meta = {};
@@ -2893,6 +2894,340 @@ function App() {
     alert('路线方案已保存！');
   }
 
+  function buildRouteExportData(date, plan) {
+    const rows = [];
+    const routePlan = plan || routePlans[date] || getEmptyRoutePlan(date);
+    routePlan.routes.forEach((route, routeIdx) => {
+      route.deviceIds.forEach((deviceId, devIdx) => {
+        const item = getRecordById(deviceId);
+        if (!item) return;
+        const rs = getReminderStatus(item, reminderSettings);
+        const dateDiff = daysBetween(item.nextDate, today);
+        let riskLabel = '';
+        if (item.status === '已完成') {
+          riskLabel = '已完成';
+        } else if (rs.type === 'overdue') {
+          riskLabel = `已逾期${Math.abs(dateDiff)}天`;
+        } else if (rs.type === 'today') {
+          riskLabel = '今日到期';
+        } else if (rs.type === 'soon') {
+          riskLabel = `即将到期（${dateDiff}天）`;
+        } else {
+          riskLabel = `剩余${dateDiff}天`;
+        }
+        rows.push({
+          routeIndex: routeIdx + 1,
+          routeName: route.estate,
+          deviceOrder: devIdx + 1,
+          estate: item.estate || '',
+          building: item.building || '',
+          elevatorNo: item.elevatorNo || '',
+          owner: item.owner || '',
+          cycle: item.cycle || '',
+          nextDate: item.nextDate || '',
+          risk: riskLabel,
+          riskType: rs.type,
+          status: item.status || '',
+          note: ''
+        });
+      });
+    });
+    return rows;
+  }
+
+  function handlePrintRoutePlan() {
+    const rows = buildRouteExportData(selectedRouteDate, currentRoutePlan);
+    if (rows.length === 0) {
+      alert('当前路线方案为空，无法打印。');
+      return;
+    }
+    const d = new Date(selectedRouteDate);
+    const weekday = weekdayLabels[(d.getDay() + 6) % 7];
+    const totalCount = rows.length;
+    const routeCount = currentRoutePlan.routes.length;
+    const rowsByRoute = {};
+    rows.forEach((r) => {
+      if (!rowsByRoute[r.routeIndex]) rowsByRoute[r.routeIndex] = [];
+      rowsByRoute[r.routeIndex].push(r);
+    });
+    const riskClass = (type) => {
+      if (type === 'overdue') return 'risk-overdue';
+      if (type === 'today') return 'risk-today';
+      if (type === 'soon') return 'risk-soon';
+      return '';
+    };
+    let tableHTML = '';
+    Object.entries(rowsByRoute).forEach(([routeIdx, routeRows]) => {
+      const r0 = routeRows[0];
+      tableHTML += `
+        <tr class="route-group-header">
+          <td colspan="11">
+            <span class="route-badge">路线 ${routeIdx}</span>
+            <strong>${r0.routeName}</strong>
+            <span class="route-count">共 ${routeRows.length} 台设备</span>
+          </td>
+        </tr>`;
+      routeRows.forEach((r) => {
+        tableHTML += `
+          <tr>
+            <td class="col-order">${r.deviceOrder}</td>
+            <td>${r.estate}</td>
+            <td>${r.building}</td>
+            <td class="col-elevator">${r.elevatorNo}</td>
+            <td>${r.owner}</td>
+            <td class="col-risk ${riskClass(r.riskType)}">${r.risk}</td>
+            <td>${r.nextDate}</td>
+            <td>${r.cycle}</td>
+            <td>${r.status}</td>
+            <td class="col-signature"></td>
+            <td class="col-note"></td>
+          </tr>`;
+      });
+    });
+    const uniqueOwners = [...new Set(rows.map(r => r.owner).filter(Boolean))].join('、') || '—';
+    const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>维保路线执行清单 - ${selectedRouteDate}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; margin: 0; padding: 24px; color: #172033; background: #fff; }
+  .page-title { text-align: center; margin-bottom: 8px; font-size: 24px; font-weight: 700; }
+  .page-subtitle { text-align: center; color: #5b6474; margin-bottom: 24px; font-size: 14px; }
+  .summary { display: flex; gap: 24px; margin-bottom: 20px; padding: 12px 16px; background: #f8fafc; border-radius: 6px; font-size: 14px; }
+  .summary-item strong { font-size: 18px; color: #2563eb; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #d0d5dd; padding: 8px 10px; text-align: left; vertical-align: middle; }
+  th { background: #f2f4f7; font-weight: 700; }
+  .col-order { width: 50px; text-align: center; font-weight: 700; }
+  .col-elevator { font-family: monospace; }
+  .col-signature { width: 120px; color: #667085; font-size: 12px; }
+  .col-note { min-width: 140px; height: 36px; }
+  .route-group-header td { background: #eef2ff; font-weight: 600; color: #1e1b4b; }
+  .route-badge { display: inline-block; background: #2563eb; color: #fff; padding: 2px 10px; border-radius: 10px; font-size: 12px; margin-right: 10px; }
+  .route-count { margin-left: 12px; color: #667085; font-weight: 400; }
+  .risk-overdue { color: #b91c1c; font-weight: 600; }
+  .risk-today { color: #b45309; font-weight: 600; }
+  .risk-soon { color: #1d4ed8; font-weight: 600; }
+  .footer { margin-top: 24px; display: flex; justify-content: space-between; font-size: 12px; color: #667085; }
+  @media print {
+    body { padding: 12px; }
+    .summary { break-inside: avoid; }
+    table { font-size: 12px; }
+    th, td { padding: 6px 8px; }
+  }
+</style>
+</head>
+<body>
+  <h1 class="page-title">电梯维保路线执行清单</h1>
+  <p class="page-subtitle">日期：${selectedRouteDate}（${weekday}） · 生成时间：${new Date().toLocaleString('zh-CN')}</p>
+  <div class="summary">
+    <div class="summary-item"><span>路线数：</span><strong>${routeCount}</strong> 条</div>
+    <div class="summary-item"><span>设备总数：</span><strong>${totalCount}</strong> 台</div>
+    <div class="summary-item"><span>负责人：</span><strong>${uniqueOwners}</strong></div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>序号</th>
+        <th>楼盘</th>
+        <th>楼栋</th>
+        <th>电梯编号</th>
+        <th>负责人</th>
+        <th>到期风险</th>
+        <th>下次维保日期</th>
+        <th>维保周期</th>
+        <th>当前状态</th>
+        <th>执行人签字</th>
+        <th>现场备注</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${tableHTML}
+    </tbody>
+  </table>
+  <div class="footer">
+    <span>导出系统：电梯维保路线看板</span>
+    <span>本清单由系统自动生成，请按路线顺序执行维保并签字确认。</span>
+  </div>
+  <script>
+    window.onload = function() {
+      setTimeout(function() {
+        window.print();
+      }, 300);
+    };
+  <\/script>
+</body>
+</html>`;
+    const printWin = window.open('', '_blank');
+    if (printWin) {
+      printWin.document.open();
+      printWin.document.write(html);
+      printWin.document.close();
+    } else {
+      alert('弹窗被浏览器拦截，请允许弹出窗口后重试。');
+    }
+  }
+
+  function downloadText(content, filename, mimeType) {
+    const blob = new Blob([content], { type: mimeType || 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function handleExportCSV() {
+    const rows = buildRouteExportData(selectedRouteDate, currentRoutePlan);
+    if (rows.length === 0) {
+      alert('当前路线方案为空，无法导出。');
+      return;
+    }
+    const headers = ['路线序号', '路线名称', '设备顺序', '楼盘', '楼栋', '电梯编号', '负责人', '维保周期', '下次维保日期', '到期风险', '状态', '现场备注'];
+    const escapeCSV = (val) => {
+      const str = String(val ?? '');
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return '"' + str.replace(/"/g, '""') + '"';
+      }
+      return str;
+    };
+    const csvLines = [headers.map(escapeCSV).join(',')];
+    rows.forEach((r) => {
+      csvLines.push([
+        r.routeIndex, r.routeName, r.deviceOrder, r.estate, r.building,
+        r.elevatorNo, r.owner, r.cycle, r.nextDate, r.risk, r.status, r.note
+      ].map(escapeCSV).join(','));
+    });
+    const filename = `维保路线_${selectedRouteDate}.csv`;
+    downloadText('\uFEFF' + csvLines.join('\n'), filename, 'text/csv;charset=utf-8');
+  }
+
+  function handleExportHTML() {
+    const rows = buildRouteExportData(selectedRouteDate, currentRoutePlan);
+    if (rows.length === 0) {
+      alert('当前路线方案为空，无法导出。');
+      return;
+    }
+    const d = new Date(selectedRouteDate);
+    const weekday = weekdayLabels[(d.getDay() + 6) % 7];
+    const totalCount = rows.length;
+    const routeCount = currentRoutePlan.routes.length;
+    const rowsByRoute = {};
+    rows.forEach((r) => {
+      if (!rowsByRoute[r.routeIndex]) rowsByRoute[r.routeIndex] = [];
+      rowsByRoute[r.routeIndex].push(r);
+    });
+    const riskClass = (type) => {
+      if (type === 'overdue') return 'risk-overdue';
+      if (type === 'today') return 'risk-today';
+      if (type === 'soon') return 'risk-soon';
+      return '';
+    };
+    let tableHTML = '';
+    Object.entries(rowsByRoute).forEach(([routeIdx, routeRows]) => {
+      const r0 = routeRows[0];
+      tableHTML += `
+        <tr class="route-group-header">
+          <td colspan="11">
+            <span class="route-badge">路线 ${routeIdx}</span>
+            <strong>${r0.routeName}</strong>
+            <span class="route-count">共 ${routeRows.length} 台设备</span>
+          </td>
+        </tr>`;
+      routeRows.forEach((r) => {
+        tableHTML += `
+          <tr>
+            <td class="col-order">${r.deviceOrder}</td>
+            <td>${r.estate}</td>
+            <td>${r.building}</td>
+            <td class="col-elevator">${r.elevatorNo}</td>
+            <td>${r.owner}</td>
+            <td class="col-risk ${riskClass(r.riskType)}">${r.risk}</td>
+            <td>${r.nextDate}</td>
+            <td>${r.cycle}</td>
+            <td>${r.status}</td>
+            <td class="col-signature">执行人签字：</td>
+            <td class="col-note"></td>
+          </tr>`;
+      });
+    });
+    const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>维保路线执行清单 - ${selectedRouteDate}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; margin: 0; padding: 24px; color: #172033; background: #fff; }
+  .page-title { text-align: center; margin-bottom: 8px; font-size: 24px; font-weight: 700; }
+  .page-subtitle { text-align: center; color: #5b6474; margin-bottom: 24px; font-size: 14px; }
+  .summary { display: flex; gap: 24px; margin-bottom: 20px; padding: 12px 16px; background: #f8fafc; border-radius: 6px; font-size: 14px; }
+  .summary-item strong { font-size: 18px; color: #2563eb; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #d0d5dd; padding: 8px 10px; text-align: left; vertical-align: middle; }
+  th { background: #f2f4f7; font-weight: 700; }
+  .col-order { width: 50px; text-align: center; font-weight: 700; }
+  .col-elevator { font-family: monospace; }
+  .col-signature { width: 120px; color: #667085; font-size: 12px; }
+  .col-note { min-width: 140px; height: 36px; }
+  .route-group-header td { background: #eef2ff; font-weight: 600; color: #1e1b4b; }
+  .route-badge { display: inline-block; background: #2563eb; color: #fff; padding: 2px 10px; border-radius: 10px; font-size: 12px; margin-right: 10px; }
+  .route-count { margin-left: 12px; color: #667085; font-weight: 400; }
+  .risk-overdue { color: #b91c1c; font-weight: 600; }
+  .risk-today { color: #b45309; font-weight: 600; }
+  .risk-soon { color: #1d4ed8; font-weight: 600; }
+  .footer { margin-top: 24px; display: flex; justify-content: space-between; font-size: 12px; color: #667085; }
+  @media print {
+    body { padding: 12px; }
+    .summary { break-inside: avoid; }
+    table { font-size: 12px; }
+    th, td { padding: 6px 8px; }
+  }
+</style>
+</head>
+<body>
+  <h1 class="page-title">电梯维保路线执行清单</h1>
+  <p class="page-subtitle">日期：${selectedRouteDate}（${weekday}） · 生成时间：${new Date().toLocaleString('zh-CN')}</p>
+  <div class="summary">
+    <div class="summary-item"><span>路线数：</span><strong>${routeCount}</strong> 条</div>
+    <div class="summary-item"><span>设备总数：</span><strong>${totalCount}</strong> 台</div>
+    <div class="summary-item"><span>负责人：</span><strong>${[...new Set(rows.map(r => r.owner).filter(Boolean))].join('、') || '—'}</strong></div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>序号</th>
+        <th>楼盘</th>
+        <th>楼栋</th>
+        <th>电梯编号</th>
+        <th>负责人</th>
+        <th>到期风险</th>
+        <th>下次维保日期</th>
+        <th>维保周期</th>
+        <th>当前状态</th>
+        <th>执行人签字</th>
+        <th>现场备注</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${tableHTML}
+    </tbody>
+  </table>
+  <div class="footer">
+    <span>导出系统：电梯维保路线看板</span>
+    <span>本清单由系统自动生成，请按路线顺序执行维保并签字确认。</span>
+  </div>
+</body>
+</html>`;
+    const filename = `维保路线_${selectedRouteDate}.html`;
+    downloadText(html, filename, 'text/html;charset=utf-8');
+  }
+
   function getDeviceRouteStatus(deviceId) {
     for (const route of currentRoutePlan.routes) {
       const idx = route.deviceIds.indexOf(deviceId);
@@ -3010,6 +3345,152 @@ function App() {
                 <CheckCircle2 size={16} />
                 确认完成
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showPrintExportModal && (
+        <div className="modal-overlay print-modal-overlay" onClick={() => setShowPrintExportModal(false)}>
+          <div className="modal-panel print-export-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <ClipboardList size={18} />
+                <h2>路线执行清单 · 打印 / 导出</h2>
+              </div>
+              <button className="modal-close" onClick={() => setShowPrintExportModal(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="print-export-toolbar no-print">
+              <div className="print-date-info">
+                <Calendar size={16} />
+                <span>
+                  当前日期：<strong>{selectedRouteDate}</strong>
+                  （{weekdayLabels[(new Date(selectedRouteDate).getDay() + 6) % 7]}）
+                </span>
+                {(() => {
+                  const rows = buildRouteExportData(selectedRouteDate, currentRoutePlan);
+                  return (
+                    <>
+                      <span className="sep">·</span>
+                      <span>路线数：<strong>{currentRoutePlan.routes.length}</strong> 条</span>
+                      <span className="sep">·</span>
+                      <span>设备总数：<strong>{rows.length}</strong> 台</span>
+                    </>
+                  );
+                })()}
+              </div>
+              <div className="print-export-actions">
+                <button className="secondary-btn" onClick={() => { handlePrintRoutePlan(); }}>
+                  <Printer size={16} />
+                  打印清单
+                </button>
+                <button className="secondary-btn" onClick={handleExportCSV}>
+                  <FileSpreadsheet size={16} />
+                  导出 CSV
+                </button>
+                <button className="primary" onClick={handleExportHTML}>
+                  <Download size={16} />
+                  导出 HTML
+                </button>
+              </div>
+            </div>
+
+            <div className="print-preview-area">
+              {(() => {
+                const rows = buildRouteExportData(selectedRouteDate, currentRoutePlan);
+                const d = new Date(selectedRouteDate);
+                const weekday = weekdayLabels[(d.getDay() + 6) % 7];
+                if (rows.length === 0) {
+                  return (
+                    <div className="empty-print-preview">
+                      <ClipboardList size={48} />
+                      <p>当前路线方案为空，请先添加设备到路线中。</p>
+                    </div>
+                  );
+                }
+                const rowsByRoute = {};
+                rows.forEach((r) => {
+                  if (!rowsByRoute[r.routeIndex]) rowsByRoute[r.routeIndex] = [];
+                  rowsByRoute[r.routeIndex].push(r);
+                });
+                const uniqueOwners = [...new Set(rows.map(r => r.owner).filter(Boolean))];
+                const riskClass = (type) => {
+                  if (type === 'overdue') return 'risk-overdue';
+                  if (type === 'today') return 'risk-today';
+                  if (type === 'soon') return 'risk-soon';
+                  return '';
+                };
+                return (
+                  <div className="print-page">
+                    <h1 className="print-page-title">电梯维保路线执行清单</h1>
+                    <p className="print-page-subtitle">
+                      日期：{selectedRouteDate}（{weekday}） · 生成时间：{new Date().toLocaleString('zh-CN')}
+                    </p>
+                    <div className="print-summary">
+                      <div className="print-summary-item"><span>路线数：</span><strong>{currentRoutePlan.routes.length}</strong> 条</div>
+                      <div className="print-summary-item"><span>设备总数：</span><strong>{rows.length}</strong> 台</div>
+                      <div className="print-summary-item"><span>负责人：</span><strong>{uniqueOwners.join('、') || '—'}</strong></div>
+                    </div>
+                    <table className="print-table">
+                      <thead>
+                        <tr>
+                          <th>序号</th>
+                          <th>楼盘</th>
+                          <th>楼栋</th>
+                          <th>电梯编号</th>
+                          <th>负责人</th>
+                          <th>到期风险</th>
+                          <th>下次维保日期</th>
+                          <th>维保周期</th>
+                          <th>当前状态</th>
+                          <th>执行人签字</th>
+                          <th>现场备注</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(rowsByRoute).flatMap(([routeIdx, routeRows]) => {
+                          const r0 = routeRows[0];
+                          return [
+                            <tr key={`group-${routeIdx}`} className="print-route-group-header">
+                              <td colSpan={11}>
+                                <span className="print-route-badge">路线 {routeIdx}</span>
+                                <strong>{r0.routeName}</strong>
+                                <span className="print-route-count">共 {routeRows.length} 台设备</span>
+                              </td>
+                            </tr>,
+                            ...routeRows.map((r, idx) => (
+                              <tr key={`row-${r.routeIndex}-${idx}`}>
+                                <td className="print-col-order">{r.deviceOrder}</td>
+                                <td>{r.estate}</td>
+                                <td>{r.building}</td>
+                                <td className="print-col-elevator">{r.elevatorNo}</td>
+                                <td>{r.owner}</td>
+                                <td className={'print-col-risk ' + riskClass(r.riskType)}>{r.risk}</td>
+                                <td>{r.nextDate}</td>
+                                <td>{r.cycle}</td>
+                                <td>{r.status}</td>
+                                <td className="print-col-signature"></td>
+                                <td className="print-col-note"></td>
+                              </tr>
+                            ))
+                          ];
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="print-footer">
+                      <span>导出系统：电梯维保路线看板</span>
+                      <span>本清单由系统自动生成，请按路线顺序执行维保并签字确认。</span>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="modal-actions no-print" style={{ justifyContent: 'flex-end' }}>
+              <button type="button" className="secondary-btn" onClick={() => setShowPrintExportModal(false)}>关闭</button>
             </div>
           </div>
         </div>
@@ -4314,6 +4795,10 @@ function App() {
               })}
             </div>
             <div className="route-header-actions">
+              <button className="secondary-btn save-route-btn" onClick={() => setShowPrintExportModal(true)}>
+                <Printer size={16} />
+                打印 / 导出
+              </button>
               <button className="primary save-route-btn" onClick={handleSaveRoutePlan}>
                 <Save size={16} />
                 保存路线方案
