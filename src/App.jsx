@@ -321,20 +321,35 @@ function migrateRecords(records) {
   return records.map((record) => migrateRecord(record));
 }
 
+function recordsNeedMigration(original, migrated) {
+  if (original.length !== migrated.length) return true;
+  
+  return original.some((r, i) => {
+    const m = migrated[i];
+    if (r.id !== m.id) return true;
+    if (r.businessKey !== m.businessKey) return true;
+    if (r.createdAt !== m.createdAt) return true;
+    if (r.updatedAt !== m.updatedAt) return true;
+    if (!r.timeline && m.timeline) return true;
+    if (r.timeline && !m.timeline) return true;
+    if (r.timeline && m.timeline && r.timeline.length !== m.timeline.length) return true;
+    
+    const allKeys = new Set([...Object.keys(r), ...Object.keys(m)]);
+    for (const key of allKeys) {
+      if (key === 'id' || key === 'businessKey' || key === 'createdAt' || key === 'updatedAt' || key === 'timeline') continue;
+      if (r[key] !== m[key]) return true;
+    }
+    return false;
+  });
+}
+
 function loadRecords() {
   const raw = localStorage.getItem(appConfig.storage);
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
       const migrated = migrateRecords(parsed);
-      const needsPersist = parsed.some((r, i) => 
-        r.id !== migrated[i].id || 
-        r.businessKey !== migrated[i].businessKey ||
-        r.createdAt !== migrated[i].createdAt ||
-        r.updatedAt !== migrated[i].updatedAt ||
-        !r.timeline
-      );
-      if (needsPersist) {
+      if (recordsNeedMigration(parsed, migrated)) {
         localStorage.setItem(appConfig.storage, JSON.stringify(migrated));
       }
       return migrated;
@@ -346,6 +361,18 @@ function loadRecords() {
   const seeded = withIds(appConfig.seed);
   return migrateRecords(seeded);
 }
+
+const CONFLICT_FIELDS = [
+  { key: 'status', label: '状态冲突' },
+  { key: 'nextDate', label: '下次维保日期冲突' },
+  { key: 'estate', label: '楼盘名称冲突' },
+  { key: 'building', label: '楼栋编号冲突' },
+  { key: 'cycle', label: '维保周期冲突' },
+  { key: 'owner', label: '负责人冲突' },
+  { key: 'priority', label: '优先级冲突' },
+  { key: 'temperature', label: '温度读数冲突' },
+  { key: 'notes', label: '备注冲突' }
+];
 
 function detectConflicts(localRecords, importRecords) {
   const conflicts = [];
@@ -378,23 +405,18 @@ function detectConflicts(localRecords, importRecords) {
     
     const conflictTypes = [];
     
-    if (localRecord.status !== importRecord.status) {
-      conflictTypes.push({
-        type: 'status',
-        label: '状态冲突',
-        localValue: localRecord.status,
-        importValue: importRecord.status
-      });
-    }
-    
-    if (localRecord.nextDate !== importRecord.nextDate) {
-      conflictTypes.push({
-        type: 'nextDate',
-        label: '下次维保日期冲突',
-        localValue: localRecord.nextDate,
-        importValue: importRecord.nextDate
-      });
-    }
+    CONFLICT_FIELDS.forEach(({ key: fieldKey, label }) => {
+      const localVal = localRecord[fieldKey];
+      const importVal = importRecord[fieldKey];
+      if (localVal !== importVal && (localVal || importVal)) {
+        conflictTypes.push({
+          type: fieldKey,
+          label,
+          localValue: localVal,
+          importValue: importVal
+        });
+      }
+    });
     
     const localTimeline = localRecord.timeline || [];
     const importTimeline = importRecord.timeline || [];
@@ -427,6 +449,14 @@ function detectConflicts(localRecords, importRecords) {
   return { conflicts, noConflicts };
 }
 
+function getTimelineEntryKey(entry) {
+  const status = entry.status || '';
+  const at = entry.at || '';
+  const by = entry.by || '';
+  const notes = entry.notes || '';
+  return `${status}-${at}-${by}-${notes}`;
+}
+
 function detectTimelineConflict(localTimeline, importTimeline) {
   if (!localTimeline.length && !importTimeline.length) return null;
   if (!localTimeline.length) {
@@ -454,11 +484,11 @@ function detectTimelineConflict(localTimeline, importTimeline) {
   const localLastTime = new Date(localLast.at || 0).getTime();
   const importLastTime = new Date(importLast.at || 0).getTime();
   
-  const localKeys = new Set(localTimeline.map(t => `${t.status}-${t.at}`));
-  const importKeys = new Set(importTimeline.map(t => `${t.status}-${t.at}`));
+  const localKeys = new Set(localTimeline.map(t => getTimelineEntryKey(t)));
+  const importKeys = new Set(importTimeline.map(t => getTimelineEntryKey(t)));
   
-  const hasUniqueLocal = localTimeline.some(t => !importKeys.has(`${t.status}-${t.at}`));
-  const hasUniqueImport = importTimeline.some(t => !localKeys.has(`${t.status}-${t.at}`));
+  const hasUniqueLocal = localTimeline.some(t => !importKeys.has(getTimelineEntryKey(t)));
+  const hasUniqueImport = importTimeline.some(t => !localKeys.has(getTimelineEntryKey(t)));
   
   if (hasUniqueLocal && hasUniqueImport) {
     return {
@@ -472,11 +502,21 @@ function detectTimelineConflict(localTimeline, importTimeline) {
     };
   }
   
-  if (importTimeline.length > localTimeline.length && hasUniqueImport) {
+  if (hasUniqueImport) {
     return {
       type: 'timeline',
       label: '时间线追加冲突',
-      description: '导入数据有更多时间线记录',
+      description: '导入数据有新增的时间线记录',
+      localCount: localTimeline.length,
+      importCount: importTimeline.length
+    };
+  }
+  
+  if (hasUniqueLocal) {
+    return {
+      type: 'timeline',
+      label: '时间线追加冲突',
+      description: '本地数据有新增的时间线记录',
       localCount: localTimeline.length,
       importCount: importTimeline.length
     };
@@ -485,22 +525,68 @@ function detectTimelineConflict(localTimeline, importTimeline) {
   return null;
 }
 
+function mergeRecordFields(localRecord, importRecord, customMerge) {
+  const merged = { ...localRecord };
+  const allKeys = new Set([
+    ...Object.keys(localRecord || {}),
+    ...Object.keys(importRecord || {}),
+    ...Object.keys(customMerge || {})
+  ]);
+  
+  allKeys.forEach((key) => {
+    if (key === 'timeline' || key === 'id' || key === 'businessKey') return;
+    
+    if (customMerge && customMerge.hasOwnProperty(key)) {
+      merged[key] = customMerge[key];
+    } else if (importRecord && importRecord.hasOwnProperty(key) && !localRecord.hasOwnProperty(key)) {
+      merged[key] = importRecord[key];
+    } else if (localRecord && localRecord.hasOwnProperty(key)) {
+      merged[key] = localRecord[key];
+    }
+  });
+  
+  if (importRecord && importRecord.temps && importRecord.temps.length > 0) {
+    const mergedTemps = [...(localRecord.temps || [])];
+    importRecord.temps.forEach((t) => {
+      if (!mergedTemps.includes(t)) {
+        mergedTemps.push(t);
+      }
+    });
+    if (mergedTemps.length > (localRecord.temps || []).length) {
+      merged.temps = mergedTemps;
+    }
+  }
+  
+  return merged;
+}
+
 function resolveConflict(conflict, resolution, customMerge) {
   const { localRecord, importRecord } = conflict;
+  const now = new Date().toISOString();
   
   switch (resolution) {
     case 'keepLocal':
-      return { ...localRecord, updatedAt: new Date().toISOString() };
+      return { 
+        ...localRecord, 
+        timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
+        updatedAt: now 
+      };
     
     case 'useImport':
-      return { ...importRecord, updatedAt: new Date().toISOString() };
+      return { 
+        ...importRecord, 
+        id: localRecord.id,
+        businessKey: localRecord.businessKey,
+        timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
+        updatedAt: now 
+      };
     
     case 'manual':
+      const merged = mergeRecordFields(localRecord, importRecord, customMerge);
       return {
-        ...localRecord,
-        ...customMerge,
+        ...merged,
         timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
-        updatedAt: new Date().toISOString()
+        updatedAt: now
       };
     
     default:
@@ -515,7 +601,7 @@ function mergeTimelines(localTimeline, importTimeline) {
   const all = [...localTimeline, ...importTimeline];
   
   all.forEach((entry) => {
-    const key = `${entry.status}-${entry.at}-${entry.by}`;
+    const key = getTimelineEntryKey(entry);
     if (!seen.has(key)) {
       seen.add(key);
       merged.push(entry);
@@ -1339,14 +1425,19 @@ function App() {
     const conflict = mergeConflicts[conflictIndex];
     if (!conflict) return;
     
-    setManualMergeForm({
-      status: conflict.localRecord.status,
-      nextDate: conflict.localRecord.nextDate,
-      estate: conflict.localRecord.estate,
-      building: conflict.localRecord.building,
-      cycle: conflict.localRecord.cycle,
-      owner: conflict.localRecord.owner
+    const initialForm = {};
+    CONFLICT_FIELDS.forEach(({ key }) => {
+      if (conflict.localRecord.hasOwnProperty(key) || conflict.importRecord.hasOwnProperty(key)) {
+        initialForm[key] = conflict.localRecord[key];
+      }
     });
+    appConfig.fields.forEach((field) => {
+      if (!initialForm.hasOwnProperty(field.key)) {
+        initialForm[field.key] = conflict.localRecord[field.key];
+      }
+    });
+    
+    setManualMergeForm(initialForm);
     setShowManualMergeModal(true);
   }
 
@@ -1415,11 +1506,9 @@ function App() {
         const key = getBusinessKey(localRecord);
         if (!seenKeys.has(key)) {
           seenKeys.add(key);
-          const merged = {
-            ...localRecord,
-            timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
-            updatedAt: new Date().toISOString()
-          };
+          const merged = mergeRecordFields(localRecord, importRecord, null);
+          merged.timeline = mergeTimelines(localRecord.timeline || [], importRecord.timeline || []);
+          merged.updatedAt = new Date().toISOString();
           mergedRecords.push(merged);
         }
       });
@@ -2675,68 +2764,86 @@ function App() {
             </p>
 
             <div className="manual-merge-form">
-              {appConfig.fields.map((field) => {
+              {(() => {
                 const conflict = mergeConflicts[currentConflictIndex];
-                const localVal = conflict.localRecord[field.key];
-                const importVal = conflict.importRecord[field.key];
-                const hasConflict = localVal !== importVal;
+                const displayedFields = new Set();
+                const fields = [];
 
-                return (
-                  <div key={field.key} className={'manual-merge-field ' + (hasConflict ? 'has-conflict' : '')}>
-                    <label className="manual-merge-label">
-                      <span>{field.label}</span>
-                      {hasConflict && <span className="conflict-badge">冲突</span>}
-                    </label>
-                    <div className="manual-merge-options">
-                      <button
-                        type="button"
-                        className={'manual-merge-option local-option ' + (manualMergeForm[field.key] === localVal ? 'selected' : '')}
-                        onClick={() => setManualMergeForm({ ...manualMergeForm, [field.key]: localVal })}
-                      >
-                        <span className="option-badge">本地</span>
-                        <span className="option-value">
-                          {field.type === 'select' ? (localVal || '—') : (localVal || '—')}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        className={'manual-merge-option import-option ' + (manualMergeForm[field.key] === importVal ? 'selected' : '')}
-                        onClick={() => setManualMergeForm({ ...manualMergeForm, [field.key]: importVal })}
-                      >
-                        <span className="option-badge">导入</span>
-                        <span className="option-value">
-                          {field.type === 'select' ? (importVal || '—') : (importVal || '—')}
-                        </span>
-                      </button>
+                appConfig.fields.forEach((field) => {
+                  displayedFields.add(field.key);
+                  const localVal = conflict.localRecord[field.key];
+                  const importVal = conflict.importRecord[field.key];
+                  const hasConflict = localVal !== importVal;
+                  fields.push(
+                    <div key={field.key} className={'manual-merge-field ' + (hasConflict ? 'has-conflict' : '')}>
+                      <label className="manual-merge-label">
+                        <span>{field.label}</span>
+                        {hasConflict && <span className="conflict-badge">冲突</span>}
+                      </label>
+                      <div className="manual-merge-options">
+                        <button
+                          type="button"
+                          className={'manual-merge-option local-option ' + (manualMergeForm[field.key] === localVal ? 'selected' : '')}
+                          onClick={() => setManualMergeForm({ ...manualMergeForm, [field.key]: localVal })}
+                        >
+                          <span className="option-badge">本地</span>
+                          <span className="option-value">
+                            {field.type === 'select' ? (localVal || '—') : (localVal || '—')}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className={'manual-merge-option import-option ' + (manualMergeForm[field.key] === importVal ? 'selected' : '')}
+                          onClick={() => setManualMergeForm({ ...manualMergeForm, [field.key]: importVal })}
+                        >
+                          <span className="option-badge">导入</span>
+                          <span className="option-value">
+                            {field.type === 'select' ? (importVal || '—') : (importVal || '—')}
+                          </span>
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                });
 
-              <div className="manual-merge-field">
-                <label className="manual-merge-label">
-                  <span>当前状态</span>
-                  <span className="conflict-badge">冲突</span>
-                </label>
-                <div className="manual-merge-options">
-                  <button
-                    type="button"
-                    className={'manual-merge-option local-option ' + (manualMergeForm.status === mergeConflicts[currentConflictIndex].localRecord.status ? 'selected' : '')}
-                    onClick={() => setManualMergeForm({ ...manualMergeForm, status: mergeConflicts[currentConflictIndex].localRecord.status })}
-                  >
-                    <span className="option-badge">本地</span>
-                    <span className="option-value">{mergeConflicts[currentConflictIndex].localRecord.status}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={'manual-merge-option import-option ' + (manualMergeForm.status === mergeConflicts[currentConflictIndex].importRecord.status ? 'selected' : '')}
-                    onClick={() => setManualMergeForm({ ...manualMergeForm, status: mergeConflicts[currentConflictIndex].importRecord.status })}
-                  >
-                    <span className="option-badge">导入</span>
-                    <span className="option-value">{mergeConflicts[currentConflictIndex].importRecord.status}</span>
-                  </button>
-                </div>
-              </div>
+                CONFLICT_FIELDS.forEach(({ key, label }) => {
+                  if (displayedFields.has(key)) return;
+                  if (!conflict.localRecord.hasOwnProperty(key) && !conflict.importRecord.hasOwnProperty(key)) return;
+                  
+                  displayedFields.add(key);
+                  const localVal = conflict.localRecord[key];
+                  const importVal = conflict.importRecord[key];
+                  const hasConflict = localVal !== importVal;
+                  fields.push(
+                    <div key={key} className={'manual-merge-field ' + (hasConflict ? 'has-conflict' : '')}>
+                      <label className="manual-merge-label">
+                        <span>{label}</span>
+                        {hasConflict && <span className="conflict-badge">冲突</span>}
+                      </label>
+                      <div className="manual-merge-options">
+                        <button
+                          type="button"
+                          className={'manual-merge-option local-option ' + (manualMergeForm[key] === localVal ? 'selected' : '')}
+                          onClick={() => setManualMergeForm({ ...manualMergeForm, [key]: localVal })}
+                        >
+                          <span className="option-badge">本地</span>
+                          <span className="option-value">{localVal || '—'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={'manual-merge-option import-option ' + (manualMergeForm[key] === importVal ? 'selected' : '')}
+                          onClick={() => setManualMergeForm({ ...manualMergeForm, [key]: importVal })}
+                        >
+                          <span className="option-badge">导入</span>
+                          <span className="option-value">{importVal || '—'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                });
+
+                return fields;
+              })()}
 
               <div className="manual-merge-field timeline-info">
                 <div className="timeline-info-header">
