@@ -179,8 +179,10 @@ const DEFAULT_REMINDER_SETTINGS = {
 };
 
 const ROUTE_PLANS_STORAGE_KEY = 'hxwl-61303-route-plans';
-const DATA_EXPORT_VERSION = '1.0.0';
+const DATA_EXPORT_VERSION = '1.1.0';
 const DATA_EXPORT_APP_ID = 'hxwl-61303-elevator-maintenance';
+const MERGE_DATA_VERSION = '1.0.0';
+const MERGE_DATA_APP_ID = 'hxwl-61303-elevator-maintenance';
 
 function getNextDays(count) {
   const dates = [];
@@ -274,16 +276,324 @@ function withIds(items) {
   return items.map((item) => ({ id: uid(), timeline: item.timeline || [{ status: item.status, at: today, by: '系统' }], ...item }));
 }
 
+function getBusinessKey(record) {
+  return record.businessKey || record.elevatorNo || '';
+}
+
+function migrateRecord(record) {
+  const now = new Date().toISOString();
+  const migrated = { ...record };
+  
+  if (!migrated.id) {
+    migrated.id = uid();
+  }
+  
+  if (!migrated.businessKey) {
+    migrated.businessKey = migrated.elevatorNo || migrated.id;
+  }
+  
+  if (!migrated.createdAt) {
+    if (migrated.timeline && migrated.timeline.length > 0) {
+      const firstTimeline = migrated.timeline[0];
+      migrated.createdAt = firstTimeline.at ? new Date(firstTimeline.at + 'T00:00:00').toISOString() : now;
+    } else {
+      migrated.createdAt = now;
+    }
+  }
+  
+  if (!migrated.updatedAt) {
+    if (migrated.timeline && migrated.timeline.length > 0) {
+      const lastTimeline = migrated.timeline[migrated.timeline.length - 1];
+      migrated.updatedAt = lastTimeline.at ? new Date(lastTimeline.at + 'T00:00:00').toISOString() : now;
+    } else {
+      migrated.updatedAt = now;
+    }
+  }
+  
+  if (!migrated.timeline) {
+    migrated.timeline = [{ status: migrated.status || appConfig.primaryStatus, at: today, by: '系统迁移' }];
+  }
+  
+  return migrated;
+}
+
+function migrateRecords(records) {
+  return records.map((record) => migrateRecord(record));
+}
+
 function loadRecords() {
   const raw = localStorage.getItem(appConfig.storage);
   if (raw) {
     try {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      const migrated = migrateRecords(parsed);
+      const needsPersist = parsed.some((r, i) => 
+        r.id !== migrated[i].id || 
+        r.businessKey !== migrated[i].businessKey ||
+        r.createdAt !== migrated[i].createdAt ||
+        r.updatedAt !== migrated[i].updatedAt ||
+        !r.timeline
+      );
+      if (needsPersist) {
+        localStorage.setItem(appConfig.storage, JSON.stringify(migrated));
+      }
+      return migrated;
     } catch {
-      return withIds(appConfig.seed);
+      const seeded = withIds(appConfig.seed);
+      return migrateRecords(seeded);
     }
   }
-  return withIds(appConfig.seed);
+  const seeded = withIds(appConfig.seed);
+  return migrateRecords(seeded);
+}
+
+function detectConflicts(localRecords, importRecords) {
+  const conflicts = [];
+  const noConflicts = { localOnly: [], importOnly: [] };
+  
+  const localMap = new Map();
+  localRecords.forEach((record) => {
+    const key = getBusinessKey(record);
+    if (key) {
+      localMap.set(key, record);
+    }
+  });
+  
+  const importMap = new Map();
+  importRecords.forEach((record) => {
+    const key = getBusinessKey(record);
+    if (key) {
+      importMap.set(key, record);
+    }
+  });
+  
+  importRecords.forEach((importRecord) => {
+    const key = getBusinessKey(importRecord);
+    const localRecord = localMap.get(key);
+    
+    if (!localRecord) {
+      noConflicts.importOnly.push(importRecord);
+      return;
+    }
+    
+    const conflictTypes = [];
+    
+    if (localRecord.status !== importRecord.status) {
+      conflictTypes.push({
+        type: 'status',
+        label: '状态冲突',
+        localValue: localRecord.status,
+        importValue: importRecord.status
+      });
+    }
+    
+    if (localRecord.nextDate !== importRecord.nextDate) {
+      conflictTypes.push({
+        type: 'nextDate',
+        label: '下次维保日期冲突',
+        localValue: localRecord.nextDate,
+        importValue: importRecord.nextDate
+      });
+    }
+    
+    const localTimeline = localRecord.timeline || [];
+    const importTimeline = importRecord.timeline || [];
+    const timelineConflict = detectTimelineConflict(localTimeline, importTimeline);
+    if (timelineConflict) {
+      conflictTypes.push(timelineConflict);
+    }
+    
+    if (conflictTypes.length > 0) {
+      conflicts.push({
+        key,
+        localRecord,
+        importRecord,
+        conflictTypes,
+        resolution: 'pending'
+      });
+    } else {
+      noConflicts.autoMergeable = noConflicts.autoMergeable || [];
+      noConflicts.autoMergeable.push({ localRecord, importRecord });
+    }
+  });
+  
+  localRecords.forEach((localRecord) => {
+    const key = getBusinessKey(localRecord);
+    if (!importMap.has(key)) {
+      noConflicts.localOnly.push(localRecord);
+    }
+  });
+  
+  return { conflicts, noConflicts };
+}
+
+function detectTimelineConflict(localTimeline, importTimeline) {
+  if (!localTimeline.length && !importTimeline.length) return null;
+  if (!localTimeline.length) {
+    return {
+      type: 'timeline',
+      label: '时间线追加冲突',
+      description: '本地无时间线记录，导入数据有时间线',
+      localCount: 0,
+      importCount: importTimeline.length
+    };
+  }
+  if (!importTimeline.length) {
+    return {
+      type: 'timeline',
+      label: '时间线追加冲突',
+      description: '导入数据无时间线记录，本地有时间线',
+      localCount: localTimeline.length,
+      importCount: 0
+    };
+  }
+  
+  const localLast = localTimeline[localTimeline.length - 1];
+  const importLast = importTimeline[importTimeline.length - 1];
+  
+  const localLastTime = new Date(localLast.at || 0).getTime();
+  const importLastTime = new Date(importLast.at || 0).getTime();
+  
+  const localKeys = new Set(localTimeline.map(t => `${t.status}-${t.at}`));
+  const importKeys = new Set(importTimeline.map(t => `${t.status}-${t.at}`));
+  
+  const hasUniqueLocal = localTimeline.some(t => !importKeys.has(`${t.status}-${t.at}`));
+  const hasUniqueImport = importTimeline.some(t => !localKeys.has(`${t.status}-${t.at}`));
+  
+  if (hasUniqueLocal && hasUniqueImport) {
+    return {
+      type: 'timeline',
+      label: '时间线追加冲突',
+      description: '两边都有独立的时间线记录',
+      localCount: localTimeline.length,
+      importCount: importTimeline.length,
+      localLastTime,
+      importLastTime
+    };
+  }
+  
+  if (importTimeline.length > localTimeline.length && hasUniqueImport) {
+    return {
+      type: 'timeline',
+      label: '时间线追加冲突',
+      description: '导入数据有更多时间线记录',
+      localCount: localTimeline.length,
+      importCount: importTimeline.length
+    };
+  }
+  
+  return null;
+}
+
+function resolveConflict(conflict, resolution, customMerge) {
+  const { localRecord, importRecord } = conflict;
+  
+  switch (resolution) {
+    case 'keepLocal':
+      return { ...localRecord, updatedAt: new Date().toISOString() };
+    
+    case 'useImport':
+      return { ...importRecord, updatedAt: new Date().toISOString() };
+    
+    case 'manual':
+      return {
+        ...localRecord,
+        ...customMerge,
+        timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
+        updatedAt: new Date().toISOString()
+      };
+    
+    default:
+      return localRecord;
+  }
+}
+
+function mergeTimelines(localTimeline, importTimeline) {
+  const merged = [];
+  const seen = new Set();
+  
+  const all = [...localTimeline, ...importTimeline];
+  
+  all.forEach((entry) => {
+    const key = `${entry.status}-${entry.at}-${entry.by}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(entry);
+    }
+  });
+  
+  merged.sort((a, b) => {
+    const timeA = new Date(a.at || 0).getTime();
+    const timeB = new Date(b.at || 0).getTime();
+    return timeA - timeB;
+  });
+  
+  return merged;
+}
+
+function buildMergeData(records, reminderSettings, routePlans, deviceInfo) {
+  return {
+    appId: MERGE_DATA_APP_ID,
+    version: MERGE_DATA_VERSION,
+    exportedAt: new Date().toISOString(),
+    deviceInfo: deviceInfo || { name: '未知设备', id: uid() },
+    data: {
+      records,
+      reminderSettings,
+      routePlans
+    }
+  };
+}
+
+function validateMergeData(parsed) {
+  const errors = [];
+  const warnings = [];
+
+  if (!parsed || typeof parsed !== 'object') {
+    errors.push('文件格式错误：不是有效的JSON对象');
+    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
+  }
+
+  if (!parsed.appId) {
+    errors.push('文件格式错误：缺少 appId 标识，可能不是本系统导出的文件');
+  } else if (parsed.appId !== MERGE_DATA_APP_ID && parsed.appId !== DATA_EXPORT_APP_ID) {
+    errors.push(`文件来源不匹配：期望 ${MERGE_DATA_APP_ID}，实际为 ${parsed.appId}`);
+  }
+
+  if (!parsed.version) {
+    warnings.push('缺少版本信息，可能存在兼容性风险');
+  }
+
+  if (!parsed.data || typeof parsed.data !== 'object') {
+    errors.push('文件结构错误：缺少 data 节点');
+    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
+  }
+
+  const { data } = parsed;
+
+  if (!Array.isArray(data.records)) {
+    errors.push('字段缺失：records 应为数组');
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
+  }
+
+  const migratedRecords = migrateRecords(data.records);
+  const summary = computeDataSummary(migratedRecords);
+  
+  return { 
+    valid: true, 
+    errors, 
+    warnings, 
+    summary, 
+    recordErrors: [], 
+    data: {
+      ...data,
+      records: migratedRecords
+    },
+    deviceInfo: parsed.deviceInfo
+  };
 }
 
 function buildExportData(records, reminderSettings, routePlans) {
@@ -583,6 +893,18 @@ function App() {
   const [importValidation, setImportValidation] = useState(null);
   const [importConfirmStep, setImportConfirmStep] = useState(false);
   const fileInputRef = useRef(null);
+  const mergeFileInputRef = useRef(null);
+  const [mergeFile, setMergeFile] = useState(null);
+  const [mergeFileName, setMergeFileName] = useState('');
+  const [mergeValidation, setMergeValidation] = useState(null);
+  const [mergeConflicts, setMergeConflicts] = useState([]);
+  const [mergeNoConflicts, setMergeNoConflicts] = useState(null);
+  const [mergeStep, setMergeStep] = useState('upload');
+  const [currentConflictIndex, setCurrentConflictIndex] = useState(0);
+  const [conflictResolutions, setConflictResolutions] = useState({});
+  const [manualMergeForm, setManualMergeForm] = useState({});
+  const [showManualMergeModal, setShowManualMergeModal] = useState(false);
+  const [deviceInfo, setDeviceInfo] = useState({ name: '', id: '' });
 
   function computeNextDate(baseDate, cycle) {
     const match = cycle && cycle.match(/(\d+)/);
@@ -922,6 +1244,215 @@ function App() {
     setSelected(null);
     alert('数据恢复成功！');
     closeDataManager();
+  }
+
+  function handleSelectMergeFileClick() {
+    if (mergeFileInputRef.current) {
+      mergeFileInputRef.current.click();
+    }
+  }
+
+  function handleMergeFileChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setMergeFile(file);
+    setMergeFileName(file.name);
+    setMergeValidation(null);
+    setMergeStep('upload');
+    setMergeConflicts([]);
+    setMergeNoConflicts(null);
+    setConflictResolutions({});
+    setCurrentConflictIndex(0);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result;
+        if (typeof text !== 'string') {
+          setMergeValidation({ valid: false, errors: ['文件读取失败'], warnings: [], summary: null });
+          return;
+        }
+        const parsed = JSON.parse(text);
+        const result = validateMergeData(parsed);
+        setMergeValidation(result);
+        setDeviceInfo(result.deviceInfo || { name: '未知设备', id: '' });
+      } catch (err) {
+        setMergeValidation({
+          valid: false,
+          errors: ['JSON解析失败：文件格式错误，请确保是有效的JSON文件'],
+          warnings: [],
+          summary: null
+        });
+      }
+    };
+    reader.onerror = () => {
+      setMergeValidation({ valid: false, errors: ['文件读取失败'], warnings: [], summary: null });
+    };
+    reader.readAsText(file);
+
+    e.target.value = '';
+  }
+
+  function resetMergeState() {
+    setMergeFile(null);
+    setMergeFileName('');
+    setMergeValidation(null);
+    setMergeStep('upload');
+    setMergeConflicts([]);
+    setMergeNoConflicts(null);
+    setConflictResolutions({});
+    setCurrentConflictIndex(0);
+    setManualMergeForm({});
+    setShowManualMergeModal(false);
+    setDeviceInfo({ name: '', id: '' });
+  }
+
+  function handleStartMerge() {
+    if (!mergeValidation?.valid || !mergeValidation.data) return;
+    
+    const { records: importRecords } = mergeValidation.data;
+    const { conflicts, noConflicts } = detectConflicts(records, importRecords);
+    
+    setMergeConflicts(conflicts);
+    setMergeNoConflicts(noConflicts);
+    
+    if (conflicts.length === 0) {
+      setMergeStep('review');
+    } else {
+      setMergeStep('resolve');
+      const initialResolutions = {};
+      conflicts.forEach((conflict, index) => {
+        initialResolutions[index] = { resolution: 'pending', customMerge: null };
+      });
+      setConflictResolutions(initialResolutions);
+    }
+  }
+
+  function handleResolveConflict(index, resolution) {
+    setConflictResolutions((prev) => ({
+      ...prev,
+      [index]: { ...prev[index], resolution, customMerge: null }
+    }));
+  }
+
+  function handleOpenManualMerge(conflictIndex) {
+    const conflict = mergeConflicts[conflictIndex];
+    if (!conflict) return;
+    
+    setManualMergeForm({
+      status: conflict.localRecord.status,
+      nextDate: conflict.localRecord.nextDate,
+      estate: conflict.localRecord.estate,
+      building: conflict.localRecord.building,
+      cycle: conflict.localRecord.cycle,
+      owner: conflict.localRecord.owner
+    });
+    setShowManualMergeModal(true);
+  }
+
+  function handleSaveManualMerge(conflictIndex) {
+    setConflictResolutions((prev) => ({
+      ...prev,
+      [conflictIndex]: { resolution: 'manual', customMerge: { ...manualMergeForm } }
+    }));
+    setShowManualMergeModal(false);
+  }
+
+  function handleNextConflict() {
+    if (currentConflictIndex < mergeConflicts.length - 1) {
+      setCurrentConflictIndex(currentConflictIndex + 1);
+    }
+  }
+
+  function handlePrevConflict() {
+    if (currentConflictIndex > 0) {
+      setCurrentConflictIndex(currentConflictIndex - 1);
+    }
+  }
+
+  function handleAllConflictsResolved() {
+    const allResolved = mergeConflicts.every((_, index) => {
+      const res = conflictResolutions[index];
+      return res && res.resolution !== 'pending';
+    });
+    return allResolved;
+  }
+
+  function goToReviewStep() {
+    if (handleAllConflictsResolved()) {
+      setMergeStep('review');
+    }
+  }
+
+  function handleExecuteMerge() {
+    if (!mergeValidation?.data) return;
+    
+    const mergedRecords = [];
+    const seenKeys = new Set();
+    
+    if (mergeNoConflicts?.localOnly) {
+      mergeNoConflicts.localOnly.forEach((record) => {
+        const key = getBusinessKey(record);
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          mergedRecords.push(record);
+        }
+      });
+    }
+    
+    if (mergeNoConflicts?.importOnly) {
+      mergeNoConflicts.importOnly.forEach((record) => {
+        const key = getBusinessKey(record);
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          mergedRecords.push(record);
+        }
+      });
+    }
+    
+    if (mergeNoConflicts?.autoMergeable) {
+      mergeNoConflicts.autoMergeable.forEach(({ localRecord, importRecord }) => {
+        const key = getBusinessKey(localRecord);
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          const merged = {
+            ...localRecord,
+            timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
+            updatedAt: new Date().toISOString()
+          };
+          mergedRecords.push(merged);
+        }
+      });
+    }
+    
+    mergeConflicts.forEach((conflict, index) => {
+      const key = conflict.key;
+      const resolution = conflictResolutions[index];
+      if (resolution && !seenKeys.has(key)) {
+        seenKeys.add(key);
+        const resolvedRecord = resolveConflict(conflict, resolution.resolution, resolution.customMerge);
+        mergedRecords.push(resolvedRecord);
+      }
+    });
+    
+    const finalRecords = migrateRecords(mergedRecords);
+    
+    persist(finalRecords);
+    setSelected(null);
+    alert(`合并完成！共 ${finalRecords.length} 条记录。`);
+    closeDataManager();
+  }
+
+  function handleExportMergeData() {
+    const deviceName = prompt('请输入设备名称（用于标识数据来源）：', '设备' + Math.floor(Math.random() * 1000));
+    if (!deviceName) return;
+    
+    const deviceId = uid();
+    const exportData = buildMergeData(records, reminderSettings, routePlans, { name: deviceName, id: deviceId });
+    const dateStr = formatDate(new Date());
+    const safeDeviceName = deviceName.replace(/[^\w\u4e00-\u9fa5]/g, '_');
+    const filename = `电梯维保数据_${safeDeviceName}_${dateStr}.json`;
+    downloadJSON(exportData, filename);
   }
 
   function addTemperature(item) {
@@ -1446,17 +1977,24 @@ function App() {
             <div className="dm-tabs">
               <button
                 className={'dm-tab ' + (dataManagerTab === 'export' ? 'active' : '')}
-                onClick={() => { setDataManagerTab('export'); resetImportState(); }}
+                onClick={() => { setDataManagerTab('export'); resetImportState(); resetMergeState(); }}
               >
                 <Download size={16} />
                 数据导出
               </button>
               <button
                 className={'dm-tab ' + (dataManagerTab === 'import' ? 'active' : '')}
-                onClick={() => setDataManagerTab('import')}
+                onClick={() => { setDataManagerTab('import'); resetMergeState(); }}
               >
                 <RefreshCw size={16} />
                 数据恢复
+              </button>
+              <button
+                className={'dm-tab ' + (dataManagerTab === 'merge' ? 'active' : '')}
+                onClick={() => { setDataManagerTab('merge'); resetImportState(); }}
+              >
+                <Database size={16} />
+                多端合并
               </button>
             </div>
 
@@ -1493,11 +2031,27 @@ function App() {
                     </div>
                   </div>
                 </div>
+
+                <div className="dm-export-section">
+                  <div className="dm-section-title">
+                    <HardDrive size={16} />
+                    多端合并导出
+                  </div>
+                  <p className="hint">
+                    导出带有设备标识的数据包，用于在多设备间进行离线冲突合并。
+                    每条记录包含业务标识和更新时间，便于合并时检测冲突。
+                  </p>
+                </div>
+
                 <div className="modal-actions">
                   <button type="button" className="secondary-btn" onClick={closeDataManager}>取消</button>
                   <button type="button" className="primary" onClick={handleExportData}>
                     <Download size={16} />
-                    导出JSON文件
+                    导出备份文件
+                  </button>
+                  <button type="button" className="primary" style={{background: '#059669'}} onClick={handleExportMergeData}>
+                    <RefreshCw size={16} />
+                    导出合并数据包
                   </button>
                 </div>
               </div>
@@ -1670,6 +2224,546 @@ function App() {
                 </div>
               </div>
             )}
+
+            {dataManagerTab === 'merge' && mergeStep === 'upload' && (
+              <div className="dm-content">
+                <p className="hint">
+                  导入其他设备导出的维保数据文件，系统将自动检测冲突并提供逐条合并选项。
+                  每条记录以电梯编号作为稳定业务标识进行匹配。
+                </p>
+
+                <input
+                  ref={mergeFileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                  onChange={handleMergeFileChange}
+                />
+
+                <div className={'dm-dropzone ' + (mergeFile ? 'has-file' : '')} onClick={handleSelectMergeFileClick}>
+                  <FileJson size={42} />
+                  {mergeFileName ? (
+                    <>
+                      <strong className="dm-filename">{mergeFileName}</strong>
+                      <span className="dm-filehint">点击重新选择文件</span>
+                    </>
+                  ) : (
+                    <>
+                      <strong>点击选择JSON文件</strong>
+                      <span className="dm-filehint">或拖拽文件到此处（仅支持 .json 格式）</span>
+                    </>
+                  )}
+                </div>
+
+                {mergeValidation && !mergeValidation.valid && (
+                  <div className="dm-errors">
+                    <div className="dm-section-title">
+                      <XCircle size={16} />
+                      验证失败
+                    </div>
+                    {mergeValidation.errors.map((err, idx) => (
+                      <div key={idx} className="dm-error-item">
+                        <AlertTriangle size={14} />
+                        {err}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {mergeValidation && mergeValidation.valid && (
+                  <div className="dm-validation-ok">
+                    <div className="dm-section-title">
+                      <CheckCircle2 size={16} />
+                      文件验证通过
+                    </div>
+
+                    {deviceInfo?.name && (
+                      <div className="dm-device-info">
+                        <div className="dm-device-info-icon"><HardDrive size={18} /></div>
+                        <div>
+                          <strong>来源设备：{deviceInfo.name}</strong>
+                          {deviceInfo.id && <p className="hint" style={{marginTop: 4}}>设备ID：{deviceInfo.id}</p>}
+                        </div>
+                      </div>
+                    )}
+
+                    {mergeValidation.warnings && mergeValidation.warnings.length > 0 && (
+                      <div className="dm-warnings">
+                        {mergeValidation.warnings.map((warn, idx) => (
+                          <div key={idx} className="dm-warning-item">
+                            <AlertTriangle size={14} />
+                            {warn}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="dm-preview-title">
+                      <Database size={16} />
+                      数据摘要
+                    </div>
+                    <div className="dm-preview-grid">
+                      <div className="dm-preview-item">
+                        <span className="dm-preview-label">维保记录数</span>
+                        <strong className="dm-preview-value">{mergeValidation.summary.recordCount} 条</strong>
+                      </div>
+                      <div className="dm-preview-item">
+                        <span className="dm-preview-label">负责人数量</span>
+                        <strong className="dm-preview-value">{mergeValidation.summary.ownerCount} 人</strong>
+                      </div>
+                      <div className="dm-preview-item">
+                        <span className="dm-preview-label">最早维保日期</span>
+                        <strong className="dm-preview-value">{mergeValidation.summary.earliestDate || '—'}</strong>
+                      </div>
+                      <div className="dm-preview-item">
+                        <span className="dm-preview-label">最晚维保日期</span>
+                        <strong className="dm-preview-value">{mergeValidation.summary.latestDate || '—'}</strong>
+                      </div>
+                    </div>
+
+                    <div className="dm-merge-hint">
+                      <Zap size={20} />
+                      <div>
+                        <strong>智能合并说明</strong>
+                        <p>系统将自动匹配相同电梯编号的记录，检测状态、日期和时间线冲突，您可以逐条选择处理方式。</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="modal-actions">
+                  <button type="button" className="secondary-btn" onClick={closeDataManager}>取消</button>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={handleStartMerge}
+                    disabled={!mergeValidation?.valid}
+                  >
+                    <RefreshCw size={16} />
+                    开始合并检测
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {dataManagerTab === 'merge' && mergeStep === 'resolve' && mergeConflicts.length > 0 && (
+              <div className="dm-content merge-resolve-content">
+                <div className="merge-steps">
+                  <div className="merge-step done">
+                    <span className="merge-step-num">1</span>
+                    <span>上传文件</span>
+                  </div>
+                  <div className="merge-step-line done" />
+                  <div className="merge-step active">
+                    <span className="merge-step-num">2</span>
+                    <span>解决冲突</span>
+                  </div>
+                  <div className="merge-step-line" />
+                  <div className="merge-step">
+                    <span className="merge-step-num">3</span>
+                    <span>确认合并</span>
+                  </div>
+                </div>
+
+                <div className="merge-progress">
+                  <div className="merge-progress-info">
+                    <span>共 <strong>{mergeConflicts.length}</strong> 条冲突记录</span>
+                    <span>
+                      已解决 <strong>{Object.values(conflictResolutions).filter(r => r.resolution !== 'pending').length}</strong> / {mergeConflicts.length}
+                    </span>
+                  </div>
+                  <div className="merge-progress-bar">
+                    <div 
+                      className="merge-progress-fill"
+                      style={{ width: `${(Object.values(conflictResolutions).filter(r => r.resolution !== 'pending').length / mergeConflicts.length) * 100}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="merge-conflict-nav">
+                  <button 
+                    className="secondary-btn small-btn" 
+                    onClick={handlePrevConflict}
+                    disabled={currentConflictIndex === 0}
+                  >
+                    <ChevronLeft size={16} />
+                    上一条
+                  </button>
+                  <span className="merge-conflict-count">
+                    第 {currentConflictIndex + 1} / {mergeConflicts.length} 条冲突
+                  </span>
+                  <button 
+                    className="secondary-btn small-btn" 
+                    onClick={handleNextConflict}
+                    disabled={currentConflictIndex === mergeConflicts.length - 1}
+                  >
+                    下一条
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+
+                {mergeConflicts[currentConflictIndex] && (() => {
+                  const conflict = mergeConflicts[currentConflictIndex];
+                  const resolution = conflictResolutions[currentConflictIndex];
+                  const { localRecord, importRecord, conflictTypes } = conflict;
+
+                  return (
+                    <div className="merge-conflict-detail">
+                      <div className="conflict-record-header">
+                        <div className="conflict-record-identity">
+                          <strong>{localRecord.estate} {localRecord.building}</strong>
+                          <span>{localRecord.elevatorNo} · {localRecord.cycle}</span>
+                        </div>
+                        <div className="conflict-type-tags">
+                          {conflictTypes.map((ct, idx) => (
+                            <span key={idx} className="conflict-type-tag">
+                              <AlertTriangle size={12} />
+                              {ct.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="conflict-compare">
+                        <div className="conflict-side local-side">
+                          <div className="conflict-side-header">
+                            <span className="conflict-side-badge local-badge">本地记录</span>
+                            {localRecord.updatedAt && (
+                              <span className="conflict-side-time">
+                                更新于 {new Date(localRecord.updatedAt).toLocaleString('zh-CN')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="conflict-side-fields">
+                            <div className="conflict-field">
+                              <span className="conflict-field-label">状态</span>
+                              <span className={'conflict-field-value status ' + statusClass(localRecord.status)}>
+                                {localRecord.status}
+                              </span>
+                            </div>
+                            <div className="conflict-field">
+                              <span className="conflict-field-label">下次维保</span>
+                              <span className="conflict-field-value">{localRecord.nextDate}</span>
+                            </div>
+                            <div className="conflict-field">
+                              <span className="conflict-field-label">负责人</span>
+                              <span className="conflict-field-value">{localRecord.owner}</span>
+                            </div>
+                            <div className="conflict-field">
+                              <span className="conflict-field-label">时间线</span>
+                              <span className="conflict-field-value">
+                                {(localRecord.timeline || []).length} 条记录
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="conflict-vs">VS</div>
+
+                        <div className="conflict-side import-side">
+                          <div className="conflict-side-header">
+                            <span className="conflict-side-badge import-badge">导入记录</span>
+                            {importRecord.updatedAt && (
+                              <span className="conflict-side-time">
+                                更新于 {new Date(importRecord.updatedAt).toLocaleString('zh-CN')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="conflict-side-fields">
+                            <div className="conflict-field">
+                              <span className="conflict-field-label">状态</span>
+                              <span className={'conflict-field-value status ' + statusClass(importRecord.status)}>
+                                {importRecord.status}
+                              </span>
+                            </div>
+                            <div className="conflict-field">
+                              <span className="conflict-field-label">下次维保</span>
+                              <span className="conflict-field-value">{importRecord.nextDate}</span>
+                            </div>
+                            <div className="conflict-field">
+                              <span className="conflict-field-label">负责人</span>
+                              <span className="conflict-field-value">{importRecord.owner}</span>
+                            </div>
+                            <div className="conflict-field">
+                              <span className="conflict-field-label">时间线</span>
+                              <span className="conflict-field-value">
+                                {(importRecord.timeline || []).length} 条记录
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="conflict-resolution-options">
+                        <div className="dm-section-title">选择处理方式</div>
+                        <div className="resolution-buttons">
+                          <button
+                            className={'resolution-btn ' + (resolution?.resolution === 'keepLocal' ? 'active' : '')}
+                            onClick={() => handleResolveConflict(currentConflictIndex, 'keepLocal')}
+                          >
+                            <div className="resolution-btn-icon local-icon">💾</div>
+                            <div className="resolution-btn-text">
+                              <strong>保留本地</strong>
+                              <span>使用本地版本，忽略导入数据</span>
+                            </div>
+                          </button>
+                          <button
+                            className={'resolution-btn ' + (resolution?.resolution === 'useImport' ? 'active' : '')}
+                            onClick={() => handleResolveConflict(currentConflictIndex, 'useImport')}
+                          >
+                            <div className="resolution-btn-icon import-icon">📥</div>
+                            <div className="resolution-btn-text">
+                              <strong>使用导入</strong>
+                              <span>用导入数据覆盖本地</span>
+                            </div>
+                          </button>
+                          <button
+                            className={'resolution-btn ' + (resolution?.resolution === 'manual' ? 'active' : '')}
+                            onClick={() => handleOpenManualMerge(currentConflictIndex)}
+                          >
+                            <div className="resolution-btn-icon manual-icon">✏️</div>
+                            <div className="resolution-btn-text">
+                              <strong>手动合并</strong>
+                              <span>自定义选择各字段值</span>
+                            </div>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="modal-actions">
+                  <button type="button" className="secondary-btn" onClick={() => setMergeStep('upload')}>
+                    返回上传
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={goToReviewStep}
+                    disabled={!handleAllConflictsResolved()}
+                  >
+                    <CheckCircle2 size={16} />
+                    全部解决，下一步
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {dataManagerTab === 'merge' && mergeStep === 'review' && (
+              <div className="dm-content">
+                <div className="merge-steps">
+                  <div className="merge-step done">
+                    <span className="merge-step-num">1</span>
+                    <span>上传文件</span>
+                  </div>
+                  <div className="merge-step-line done" />
+                  <div className="merge-step done">
+                    <span className="merge-step-num">2</span>
+                    <span>解决冲突</span>
+                  </div>
+                  <div className="merge-step-line done" />
+                  <div className="merge-step active">
+                    <span className="merge-step-num">3</span>
+                    <span>确认合并</span>
+                  </div>
+                </div>
+
+                <div className="merge-review-summary">
+                  <div className="dm-section-title">
+                    <CheckCircle2 size={16} />
+                    合并预览
+                  </div>
+                  
+                  <div className="merge-review-grid">
+                    <div className="merge-review-item">
+                      <span className="merge-review-label">本地原有记录</span>
+                      <strong className="merge-review-value">{records.length} 条</strong>
+                    </div>
+                    <div className="merge-review-item">
+                      <span className="merge-review-label">导入记录</span>
+                      <strong className="merge-review-value">
+                        {mergeValidation?.summary.recordCount || 0} 条
+                      </strong>
+                    </div>
+                    <div className="merge-review-item">
+                      <span className="merge-review-label">检测到冲突</span>
+                      <strong className="merge-review-value conflict-count">
+                        {mergeConflicts.length} 条
+                      </strong>
+                    </div>
+                    <div className="merge-review-item">
+                      <span className="merge-review-label">自动合并</span>
+                      <strong className="merge-review-value success-count">
+                        {(mergeNoConflicts?.importOnly?.length || 0) + 
+                         (mergeNoConflicts?.localOnly?.length || 0) + 
+                         (mergeNoConflicts?.autoMergeable?.length || 0)} 条
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="merge-review-details">
+                    {mergeNoConflicts?.importOnly && mergeNoConflicts.importOnly.length > 0 && (
+                      <div className="merge-review-detail-item">
+                        <span className="detail-icon plus">+</span>
+                        <span>新增记录（仅导入有）：</span>
+                        <strong>{mergeNoConflicts.importOnly.length} 条</strong>
+                      </div>
+                    )}
+                    {mergeNoConflicts?.localOnly && mergeNoConflicts.localOnly.length > 0 && (
+                      <div className="merge-review-detail-item">
+                        <span className="detail-icon keep">K</span>
+                        <span>保留记录（仅本地有）：</span>
+                        <strong>{mergeNoConflicts.localOnly.length} 条</strong>
+                      </div>
+                    )}
+                    {mergeNoConflicts?.autoMergeable && mergeNoConflicts.autoMergeable.length > 0 && (
+                      <div className="merge-review-detail-item">
+                        <span className="detail-icon merge">M</span>
+                        <span>无冲突自动合并：</span>
+                        <strong>{mergeNoConflicts.autoMergeable.length} 条</strong>
+                      </div>
+                    )}
+                    {mergeConflicts.length > 0 && (
+                      <div className="merge-review-detail-item">
+                        <span className="detail-icon conflict">!</span>
+                        <span>已解决冲突：</span>
+                        <strong>{mergeConflicts.length} 条</strong>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="dm-merge-hint">
+                    <ShieldAlert size={20} />
+                    <div>
+                      <strong>合并完成后</strong>
+                      <p>合并后的记录将保存到本地，原有数据将被替换。建议先导出本地数据备份。</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="modal-actions">
+                  <button type="button" className="secondary-btn" onClick={() => mergeConflicts.length > 0 ? setMergeStep('resolve') : setMergeStep('upload')}>
+                    返回修改
+                  </button>
+                  <button type="button" className="primary" onClick={handleExecuteMerge}>
+                    <CheckCircle2 size={16} />
+                    确认并执行合并
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showManualMergeModal && mergeConflicts[currentConflictIndex] && (
+        <div className="modal-overlay" onClick={() => setShowManualMergeModal(false)}>
+          <div className="modal-panel manual-merge-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <Settings size={18} />
+                <h2>手动合并</h2>
+              </div>
+              <button className="modal-close" onClick={() => setShowManualMergeModal(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="hint">
+              为每条字段选择您希望保留的值，时间线将自动合并两边的所有记录。
+            </p>
+
+            <div className="manual-merge-form">
+              {appConfig.fields.map((field) => {
+                const conflict = mergeConflicts[currentConflictIndex];
+                const localVal = conflict.localRecord[field.key];
+                const importVal = conflict.importRecord[field.key];
+                const hasConflict = localVal !== importVal;
+
+                return (
+                  <div key={field.key} className={'manual-merge-field ' + (hasConflict ? 'has-conflict' : '')}>
+                    <label className="manual-merge-label">
+                      <span>{field.label}</span>
+                      {hasConflict && <span className="conflict-badge">冲突</span>}
+                    </label>
+                    <div className="manual-merge-options">
+                      <button
+                        type="button"
+                        className={'manual-merge-option local-option ' + (manualMergeForm[field.key] === localVal ? 'selected' : '')}
+                        onClick={() => setManualMergeForm({ ...manualMergeForm, [field.key]: localVal })}
+                      >
+                        <span className="option-badge">本地</span>
+                        <span className="option-value">
+                          {field.type === 'select' ? (localVal || '—') : (localVal || '—')}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className={'manual-merge-option import-option ' + (manualMergeForm[field.key] === importVal ? 'selected' : '')}
+                        onClick={() => setManualMergeForm({ ...manualMergeForm, [field.key]: importVal })}
+                      >
+                        <span className="option-badge">导入</span>
+                        <span className="option-value">
+                          {field.type === 'select' ? (importVal || '—') : (importVal || '—')}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <div className="manual-merge-field">
+                <label className="manual-merge-label">
+                  <span>当前状态</span>
+                  <span className="conflict-badge">冲突</span>
+                </label>
+                <div className="manual-merge-options">
+                  <button
+                    type="button"
+                    className={'manual-merge-option local-option ' + (manualMergeForm.status === mergeConflicts[currentConflictIndex].localRecord.status ? 'selected' : '')}
+                    onClick={() => setManualMergeForm({ ...manualMergeForm, status: mergeConflicts[currentConflictIndex].localRecord.status })}
+                  >
+                    <span className="option-badge">本地</span>
+                    <span className="option-value">{mergeConflicts[currentConflictIndex].localRecord.status}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={'manual-merge-option import-option ' + (manualMergeForm.status === mergeConflicts[currentConflictIndex].importRecord.status ? 'selected' : '')}
+                    onClick={() => setManualMergeForm({ ...manualMergeForm, status: mergeConflicts[currentConflictIndex].importRecord.status })}
+                  >
+                    <span className="option-badge">导入</span>
+                    <span className="option-value">{mergeConflicts[currentConflictIndex].importRecord.status}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="manual-merge-field timeline-info">
+                <div className="timeline-info-header">
+                  <Clock size={16} />
+                  <strong>时间线</strong>
+                </div>
+                <p className="hint">时间线将自动合并两边的所有记录，并按时间排序。</p>
+                <div className="timeline-counts">
+                  <span>本地：{(mergeConflicts[currentConflictIndex].localRecord.timeline || []).length} 条</span>
+                  <span>导入：{(mergeConflicts[currentConflictIndex].importRecord.timeline || []).length} 条</span>
+                  <span className="merge-total">
+                    合并后：{mergeTimelines(
+                      mergeConflicts[currentConflictIndex].localRecord.timeline || [],
+                      mergeConflicts[currentConflictIndex].importRecord.timeline || []
+                    ).length} 条
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-btn" onClick={() => setShowManualMergeModal(false)}>取消</button>
+              <button type="button" className="primary" onClick={() => handleSaveManualMerge(currentConflictIndex)}>
+                <CheckCircle2 size={16} />
+                确认手动合并
+              </button>
+            </div>
           </div>
         </div>
       )}
