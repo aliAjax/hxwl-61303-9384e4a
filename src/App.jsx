@@ -1767,26 +1767,44 @@ function App() {
     dates.forEach((d) => { datePlan[d] = []; });
 
     const ownerDailyCounts = {};
-    Object.keys(datePlan).forEach((d) => {
+    const estateDailyCounts = {};
+    dates.forEach((d) => {
       ownerDailyCounts[d] = {};
+      estateDailyCounts[d] = {};
     });
 
     const recordsInRoutePlans = new Set();
-    Object.values(routePlans).forEach((plan) => {
-      plan?.routes?.forEach((r) => {
-        r.deviceIds?.forEach((id) => recordsInRoutePlans.add(id));
-      });
-    });
+    const routeRecordMeta = new Map();
+    const draftExcludedFromRoute = new Set();
 
     if (autoPlanDraft) {
       Object.values(autoPlanDraft.dates || {}).forEach((items) => {
-        items.forEach((item) => recordsInRoutePlans.delete(item.recordId));
+        items.forEach((item) => draftExcludedFromRoute.add(item.recordId));
       });
     }
+
+    Object.entries(routePlans).forEach(([date, plan]) => {
+      if (!datePlan[date]) return;
+      plan?.routes?.forEach((r) => {
+        r.deviceIds?.forEach((id) => {
+          if (draftExcludedFromRoute.has(id)) return;
+          recordsInRoutePlans.add(id);
+          const rec = records.find((x) => x.id === id);
+          if (rec) {
+            const owner = rec.owner || '未分配';
+            const estate = rec.estate;
+            ownerDailyCounts[date][owner] = (ownerDailyCounts[date][owner] || 0) + 1;
+            estateDailyCounts[date][estate] = (estateDailyCounts[date][estate] || 0) + 1;
+            routeRecordMeta.set(id, { owner, estate, date });
+          }
+        });
+      });
+    });
 
     const candidateRecords = records.filter((item) => {
       if (item.status === '已完成') return false;
       if (!item.nextDate) return false;
+      if (recordsInRoutePlans.has(item.id)) return false;
       const diff = daysBetween(item.nextDate, today);
       if (diff > planDays - 1) return false;
       return true;
@@ -1823,70 +1841,77 @@ function App() {
       return a.estate.localeCompare(b.estate);
     });
 
-    function findBestDate(scoredItem, preferredStartIdx = 0) {
-      const { record, diff, owner } = scoredItem;
+    function findBestDateAndOwner(scoredItem, preferredStartIdx = 0) {
+      const { record, diff, owner: defaultOwner } = scoredItem;
       const minDateIdx = Math.max(0, Math.min(0, diff < 0 ? 0 : diff));
 
       let bestDateIdx = -1;
-      let bestEstateCountBonus = -1;
+      let bestOwner = defaultOwner;
+      let bestScore = -1;
 
       for (let i = Math.max(preferredStartIdx, minDateIdx); i < dates.length; i++) {
         const date = dates[i];
-        const ownerLimit = getOwnerDailyLimit(owner, config);
-        const currentOwnerCount = ownerDailyCounts[date][owner] || 0;
-        if (currentOwnerCount >= ownerLimit) continue;
-
-        let estateCountBonus = 0;
-        if (config.estateConcentration) {
-          estateCountBonus = datePlan[date].filter(
-            (item) => item.estate === record.estate
-          ).length;
+        const candidates = [defaultOwner];
+        if (defaultOwner === '未分配') {
+          Object.keys(ownerDailyCounts[date] || {}).forEach((o) => {
+            if (!candidates.includes(o) && o !== '未分配') candidates.push(o);
+          });
         }
 
-        if (estateCountBonus > bestEstateCountBonus) {
-          bestEstateCountBonus = estateCountBonus;
-          bestDateIdx = i;
-          if (estateCountBonus >= 2 && i === minDateIdx) break;
+        for (const owner of candidates) {
+          const ownerLimit = getOwnerDailyLimit(owner, config);
+          const currentOwnerCount = ownerDailyCounts[date][owner] || 0;
+          if (currentOwnerCount >= ownerLimit) continue;
+
+          let estateCountBonus = 0;
+          if (config.estateConcentration) {
+            estateCountBonus = (estateDailyCounts[date]?.[record.estate] || 0) +
+              datePlan[date].filter((item) => item.estate === record.estate).length;
+          }
+
+          const datePreference = i === minDateIdx ? 10 : 0;
+          const ownerPreference = owner === defaultOwner ? 5 : 0;
+          const totalScore = estateCountBonus * 10 + datePreference + ownerPreference;
+
+          if (totalScore > bestScore) {
+            bestScore = totalScore;
+            bestDateIdx = i;
+            bestOwner = owner;
+          }
         }
 
-        if (i === minDateIdx && bestDateIdx === -1) {
-          bestDateIdx = i;
+        if (bestDateIdx !== -1 && i === minDateIdx && bestOwner === defaultOwner) {
+          break;
         }
       }
 
       if (bestDateIdx === -1) {
-        for (let i = minDateIdx; i < dates.length; i++) {
-          const date = dates[i];
-          const itemsOnDate = datePlan[date].length;
-          const allOwners = [...new Set(datePlan[date].map((it) => it.owner))];
-          let hasSlot = false;
-          for (const o of allOwners) {
-            const limit = getOwnerDailyLimit(o, config);
-            const cnt = ownerDailyCounts[date][o] || 0;
-            if (cnt < limit) { hasSlot = true; break; }
-          }
-          if (!hasSlot) {
-            const defaultLimit = config.defaultDailyLimit;
-            if (itemsOnDate < defaultLimit * 2) {
-              bestDateIdx = i;
-              break;
-            }
-          } else {
-            bestDateIdx = i;
-            break;
-          }
-        }
+        return { date: null, owner: defaultOwner };
       }
 
-      return bestDateIdx >= 0 ? dates[bestDateIdx] : null;
+      const finalDate = dates[bestDateIdx];
+      const finalOwner = bestOwner;
+      const finalLimit = getOwnerDailyLimit(finalOwner, config);
+      const finalCount = ownerDailyCounts[finalDate][finalOwner] || 0;
+      if (finalCount >= finalLimit) {
+        return { date: null, owner: finalOwner };
+      }
+
+      return { date: finalDate, owner: finalOwner };
     }
 
     const draftItems = [];
     const unassignedItems = [];
 
     scoredRecords.forEach((scoredItem) => {
-      const date = findBestDate(scoredItem);
+      const { date, owner } = findBestDateAndOwner(scoredItem);
       if (date) {
+        const ownerLimit = getOwnerDailyLimit(owner, config);
+        if ((ownerDailyCounts[date][owner] || 0) >= ownerLimit) {
+          unassignedItems.push(scoredItem);
+          return;
+        }
+
         const planItem = {
           planId: planUid(),
           recordId: scoredItem.recordId,
@@ -1896,13 +1921,15 @@ function App() {
           cycle: scoredItem.record.cycle,
           originalNextDate: scoredItem.record.nextDate,
           plannedDate: date,
-          owner: scoredItem.owner,
+          owner: owner,
+          originalOwner: scoredItem.owner,
+          ownerReassigned: owner !== scoredItem.owner,
           priority: scoredItem.priority,
           daysDiff: scoredItem.diff,
           status: 'draft'
         };
         datePlan[date].push(planItem);
-        ownerDailyCounts[date][scoredItem.owner] = (ownerDailyCounts[date][scoredItem.owner] || 0) + 1;
+        ownerDailyCounts[date][owner] = (ownerDailyCounts[date][owner] || 0) + 1;
         draftItems.push(planItem);
       } else {
         unassignedItems.push(scoredItem);
@@ -2022,12 +2049,40 @@ function App() {
     const updatedRecordsMap = new Map();
     records.forEach((r) => updatedRecordsMap.set(r.id, { ...r }));
 
-    const newRoutePlans = { ...routePlans };
+    const newRoutePlans = JSON.parse(JSON.stringify(routePlans));
+
+    const existingRouteDeviceSet = new Set();
+    Object.entries(newRoutePlans).forEach(([rpDate, plan]) => {
+      plan?.routes?.forEach((r) => {
+        r.deviceIds?.forEach((id) => existingRouteDeviceSet.add(`${rpDate}:${id}`));
+      });
+    });
+
+    const globalDeviceFirstSeen = new Map();
+    const skippedItems = [];
 
     Object.entries(autoPlanDraft.dates).forEach(([date, items]) => {
       if (items.length === 0) return;
 
-      items.forEach((item) => {
+      const validItems = items.filter((item) => {
+        if (existingRouteDeviceSet.has(`${date}:${item.recordId}`)) {
+          skippedItems.push({ ...item, reason: '该日期已有此设备路线' });
+          return false;
+        }
+        if (globalDeviceFirstSeen.has(item.recordId)) {
+          skippedItems.push({ ...item, reason: `已在 ${globalDeviceFirstSeen.get(item.recordId)} 排期` });
+          return false;
+        }
+        const rec = updatedRecordsMap.get(item.recordId);
+        if (!rec || rec.status === '已完成') {
+          skippedItems.push({ ...item, reason: '记录已完成或不存在' });
+          return false;
+        }
+        globalDeviceFirstSeen.set(item.recordId, date);
+        return true;
+      });
+
+      validItems.forEach((item) => {
         const record = updatedRecordsMap.get(item.recordId);
         if (!record) return;
 
@@ -2053,7 +2108,7 @@ function App() {
       });
 
       const estateGroups = {};
-      items.forEach((item) => {
+      validItems.forEach((item) => {
         if (!estateGroups[item.estate]) estateGroups[item.estate] = [];
         estateGroups[item.estate].push(item.recordId);
       });
@@ -2086,14 +2141,21 @@ function App() {
     persist(finalRecords);
     persistRoutePlans(newRoutePlans);
 
+    const actualAffectedCount = globalDeviceFirstSeen.size;
+    const actualDayCount = new Set(
+      Array.from(globalDeviceFirstSeen.values())
+    ).size;
+
     const historyEntry = {
       id: planUid(),
       type: 'confirm',
       planId: autoPlanDraft.id,
       timestamp: new Date().toISOString(),
-      description: `确认维保计划（${autoPlanDraft.totalCount} 台设备，${Object.keys(autoPlanDraft.dates).filter(d => (autoPlanDraft.dates[d]?.length || 0) > 0).length} 天）`,
+      description: `确认维保计划（实际写入 ${actualAffectedCount} 台设备，${actualDayCount} 天${skippedItems.length > 0 ? `，跳过 ${skippedItems.length} 条冲突` : ''}）`,
       snapshot,
-      affectedCount: autoPlanDraft.totalCount
+      affectedCount: actualAffectedCount,
+      skippedCount: skippedItems.length,
+      skippedItems: skippedItems.slice(0, 50)
     };
     const newHistory = [historyEntry, ...autoPlanHistory];
     setAutoPlanHistory(newHistory);
@@ -2102,7 +2164,20 @@ function App() {
     setAutoPlanDraft(null);
     clearAutoPlanDraft();
     setPlanEditItem(null);
-    alert(`计划确认成功！\n\n共安排 ${autoPlanDraft.totalCount} 台设备，已更新记录状态和路线方案。\n您可以在「操作历史」中回滚此操作。`);
+
+    let msg = `计划确认成功！\n\n实际写入 ${actualAffectedCount} 台设备，覆盖 ${actualDayCount} 天。`;
+    if (skippedItems.length > 0) {
+      msg += `\n\n⚠️  跳过 ${skippedItems.length} 条冲突项：`;
+      const uniqueReasons = {};
+      skippedItems.forEach((it) => {
+        uniqueReasons[it.reason] = (uniqueReasons[it.reason] || 0) + 1;
+      });
+      Object.entries(uniqueReasons).forEach(([r, c]) => {
+        msg += `\n  · ${r} × ${c}`;
+      });
+    }
+    msg += `\n\n您可以在「操作历史」中回滚此操作。`;
+    alert(msg);
   }
 
   function rollbackHistoryEntry(entryId) {
