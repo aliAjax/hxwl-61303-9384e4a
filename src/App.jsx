@@ -1,6 +1,39 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Building2, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Calendar, Users, User, Settings, X, Bell, Zap, Upload, FileText, XCircle, Route, MapPin, ArrowUp, ArrowDown, GripVertical, Save, ChevronDown, ShieldAlert, AlertOctagon, Clock, UserX, Building, Download, HardDrive, Database, RefreshCw, FileJson, Printer, FileSpreadsheet } from 'lucide-react';
 import './App.css';
+import {
+  EVENT_TYPES,
+  AGGREGATE_TYPES,
+  createEvent,
+  getDeviceInfo,
+  setDeviceName,
+  EventStore,
+  EVENT_STORE_VERSION
+} from './eventStore.js';
+
+const appDefaults = {
+  reminderSettings: DEFAULT_REMINDER_SETTINGS,
+  riskRules: DEFAULT_RISK_RULES,
+  autoPlanConfig: DEFAULT_AUTO_PLAN_CONFIG
+};
+
+let globalEventStore = null;
+function getEventStore() {
+  if (!globalEventStore) {
+    globalEventStore = new EventStore(appDefaults);
+  }
+  return globalEventStore;
+}
+
+function getCurrentFullState(currentRecords, currentReminderSettings, currentRoutePlans, currentRiskRules, currentAutoPlanConfig) {
+  return {
+    records: JSON.parse(JSON.stringify(currentRecords)),
+    routePlans: JSON.parse(JSON.stringify(currentRoutePlans)),
+    reminderSettings: JSON.parse(JSON.stringify(currentReminderSettings)),
+    riskRules: JSON.parse(JSON.stringify(currentRiskRules || {})),
+    autoPlanConfig: JSON.parse(JSON.stringify(currentAutoPlanConfig || {}))
+  };
+}
 
 const appConfig = {
   "id": "hxwl-61303",
@@ -809,16 +842,20 @@ function mergeTimelines(localTimeline, importTimeline) {
 }
 
 function buildMergeData(records, reminderSettings, routePlans, deviceInfo) {
+  const es = getEventStore();
+  const eventExport = es.exportForMerge({ includeSnapshots: true });
   return {
     appId: MERGE_DATA_APP_ID,
-    version: MERGE_DATA_VERSION,
+    version: '2.0.0',
     exportedAt: new Date().toISOString(),
     deviceInfo: deviceInfo || { name: '未知设备', id: uid() },
+    eventStoreVersion: EVENT_STORE_VERSION,
     data: {
       records,
       reminderSettings,
       routePlans
-    }
+    },
+    eventStream: eventExport
   };
 }
 
@@ -839,6 +876,10 @@ function validateMergeData(parsed) {
 
   if (!parsed.version) {
     warnings.push('缺少版本信息，可能存在兼容性风险');
+  } else if (parsed.version.startsWith('2.')) {
+    if (!parsed.eventStream || !Array.isArray(parsed.eventStream.events)) {
+      warnings.push('v2.x 文件缺少事件流数据，将回退到记录级合并');
+    }
   }
 
   if (!parsed.data || typeof parsed.data !== 'object') {
@@ -858,7 +899,15 @@ function validateMergeData(parsed) {
 
   const migratedRecords = migrateRecords(data.records);
   const summary = computeDataSummary(migratedRecords);
-  
+
+  let eventBasedMerge = false;
+  let eventStream = null;
+  if (parsed.version && parsed.version.startsWith('2.') && parsed.eventStream && Array.isArray(parsed.eventStream.events)) {
+    eventStream = parsed.eventStream;
+    eventBasedMerge = true;
+    warnings.push(`检测到 ${parsed.eventStream.events.length} 条事件流数据，将启用细粒度事件级合并`);
+  }
+
   return { 
     valid: true, 
     errors, 
@@ -869,21 +918,27 @@ function validateMergeData(parsed) {
       ...data,
       records: migratedRecords
     },
-    deviceInfo: parsed.deviceInfo
+    deviceInfo: parsed.deviceInfo,
+    eventBasedMerge,
+    eventStream
   };
 }
 
 function buildExportData(records, reminderSettings, routePlans, riskRules) {
+  const es = getEventStore();
+  const eventExport = es.exportForMerge({ includeSnapshots: true });
   return {
     appId: DATA_EXPORT_APP_ID,
-    version: DATA_EXPORT_VERSION,
+    version: '2.0.0',
     exportedAt: new Date().toISOString(),
+    eventStoreVersion: EVENT_STORE_VERSION,
     data: {
       records,
       reminderSettings,
       routePlans,
       riskRules
-    }
+    },
+    eventStream: eventExport
   };
 }
 
@@ -904,8 +959,14 @@ function validateImportData(parsed) {
 
   if (!parsed.version) {
     warnings.push('缺少版本信息，可能存在兼容性风险');
+  } else if (parsed.version.startsWith('2.')) {
+    if (!parsed.eventStream || !Array.isArray(parsed.eventStream.events)) {
+      warnings.push('v2.x 文件缺少事件流数据，将仅恢复记录快照');
+    } else {
+      warnings.push(`检测到 ${parsed.eventStream.events.length} 条事件流数据，将恢复完整历史时间线`);
+    }
   } else if (parsed.version !== DATA_EXPORT_VERSION) {
-    warnings.push(`版本不一致：当前系统 v${DATA_EXPORT_VERSION}，导入文件 v${parsed.version}，部分字段可能不兼容`);
+    warnings.push(`版本不一致：当前系统 v2.0.0，导入文件 v${parsed.version}，部分字段可能不兼容`);
   }
 
   if (!parsed.data || typeof parsed.data !== 'object') {
@@ -944,7 +1005,15 @@ function validateImportData(parsed) {
   }
 
   const summary = computeDataSummary(data.records);
-  return { valid: true, errors, warnings, summary, recordErrors: [], data };
+  return { 
+    valid: true, 
+    errors, 
+    warnings, 
+    summary, 
+    recordErrors: [], 
+    data,
+    eventStream: parsed.eventStream || null
+  };
 }
 
 function validateRecordsDetail(records) {
@@ -1369,6 +1438,43 @@ function App() {
     setOwnerInputValue(form.owner || '');
   }, [form.estate, form.owner]);
 
+  useEffect(() => {
+    const es = getEventStore();
+    const events = es.getAllEvents();
+    if (events.length === 0 && records.length > 0) {
+      try {
+        console.info('[EventStore] 检测到旧数据未迁移，正在从 records/timeline 重建事件流...');
+        const migratedEventCount = es.rebuildFromLegacyData({
+          records,
+          routePlans
+        });
+        const initialEvt = createEvent({
+          type: EVENT_TYPES.DATA_RESTORE,
+          aggregateType: AGGREGATE_TYPES.SYSTEM,
+          aggregateId: 'legacy_upgrade_' + Date.now().toString(36),
+          actor: '系统迁移',
+          payload: {
+            restoreMode: 'legacy_upgrade_init',
+            restoredEventCount: migratedEventCount,
+            beforeRecordCount: 0,
+            afterRecordCount: records.length,
+            snapshotState: {
+              records,
+              reminderSettings,
+              routePlans,
+              riskRules,
+              autoPlanConfig
+            }
+          }
+        });
+        es.appendEvent(initialEvt, getCurrentFullState(records, reminderSettings, routePlans, riskRules, autoPlanConfig));
+        console.info(`[EventStore] 迁移完成：共重建 ${migratedEventCount} 条历史事件`);
+      } catch (e) {
+        console.error('[EventStore] 旧数据迁移失败:', e);
+      }
+    }
+  }, []);
+
   function computeNextDate(baseDate, cycle) {
     const match = cycle && cycle.match(/(\d+)/);
     if (!match || !baseDate) return '';
@@ -1407,6 +1513,7 @@ function App() {
     const newTimelines = [...(backfillItem.timeline || []), completedTimelineEntry];
     let finalStatus = '已完成';
     let finalNextDate = backfillForm.nextDate || backfillItem.nextDate;
+    const timelineEntries = [completedTimelineEntry];
 
     if (withNextCycle) {
       finalStatus = '待维保';
@@ -1421,6 +1528,7 @@ function App() {
         }
       };
       newTimelines.push(nextCycleTimelineEntry);
+      timelineEntries.push(nextCycleTimelineEntry);
     }
 
     const next = records.map((item) => item.id === backfillItem.id ? {
@@ -1429,6 +1537,24 @@ function App() {
       nextDate: finalNextDate,
       timeline: newTimelines
     } : item);
+
+    const evt = createEvent({
+      type: withNextCycle ? EVENT_TYPES.BACKFILL_WITH_NEXT_CYCLE : EVENT_TYPES.BACKFILL_COMPLETE,
+      aggregateType: AGGREGATE_TYPES.RECORD,
+      aggregateId: backfillItem.id,
+      actor: backfillForm.executor || '操作员',
+      payload: {
+        recordId: backfillItem.id,
+        finalStatus,
+        finalNextDate,
+        previousStatus: backfillItem.status,
+        previousNextDate: backfillItem.nextDate,
+        backfillInfo: completedTimelineEntry.backfill,
+        timelineEntries
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(next, reminderSettings, routePlans, riskRules, autoPlanConfig));
+
     persist(next);
     if (selected?.id === backfillItem.id) setSelected(next.find((item) => item.id === backfillItem.id));
     setShowBackfillModal(false);
@@ -1598,10 +1724,21 @@ function App() {
       owner: record.owner,
       status: appConfig.primaryStatus,
       createdAt: new Date().toISOString(),
-      timeline: [{ status: appConfig.primaryStatus, at: today, by: '录入' }]
+      timeline: [{ status: appConfig.primaryStatus, at: today, by: '批量录入' }]
     }));
 
-    persist([...newRecords, ...records]);
+    const nextRecords = [...newRecords, ...records];
+
+    const evt = createEvent({
+      type: EVENT_TYPES.BULK_IMPORT,
+      aggregateType: AGGREGATE_TYPES.RECORD,
+      aggregateId: 'bulk_' + Date.now().toString(36),
+      actor: '操作员',
+      payload: { records: newRecords.map(r => ({ ...r })), count: newRecords.length }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(nextRecords, reminderSettings, routePlans, riskRules, autoPlanConfig));
+
+    persist(nextRecords);
     setShowImportModal(false);
     setImportText('');
     setParsedImport(null);
@@ -1702,7 +1839,17 @@ function App() {
       if (temp > 2) nextRecord.status = '异常';
     }
 
-    persist([nextRecord, ...records]);
+    const nextRecords = [nextRecord, ...records];
+    const evt = createEvent({
+      type: EVENT_TYPES.RECORD_CREATE,
+      aggregateType: AGGREGATE_TYPES.RECORD,
+      aggregateId: nextRecord.id,
+      actor: '操作员',
+      payload: { record: { ...nextRecord } }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(nextRecords, reminderSettings, routePlans, riskRules, autoPlanConfig));
+
+    persist(nextRecords);
     setForm({
       ...appConfig.defaultValues,
       estate: form.estate,
@@ -1715,24 +1862,58 @@ function App() {
   }
 
   function updateStatus(id, status) {
-    const next = records.map((item) => item.id === id ? {
-      ...item,
+    const item = records.find(r => r.id === id);
+    const timelineEntry = { status, at: today, by: '操作员' };
+    const next = records.map((item2) => item2.id === id ? {
+      ...item2,
       status,
-      timeline: [...(item.timeline || []), { status, at: today, by: '操作员' }]
-    } : item);
+      timeline: [...(item2.timeline || []), timelineEntry]
+    } : item2);
+
+    const evt = createEvent({
+      type: EVENT_TYPES.STATUS_TRANSITION,
+      aggregateType: AGGREGATE_TYPES.RECORD,
+      aggregateId: id,
+      actor: '操作员',
+      payload: { recordId: id, status, timelineEntry, previousStatus: item?.status }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(next, reminderSettings, routePlans, riskRules, autoPlanConfig));
+
     persist(next);
-    if (selected?.id === id) setSelected(next.find((item) => item.id === id));
+    if (selected?.id === id) setSelected(next.find((item2) => item2.id === id));
   }
 
   function removeRecord(id) {
+    const record = records.find(r => r.id === id);
     const next = records.filter((item) => item.id !== id);
+
+    const evt = createEvent({
+      type: EVENT_TYPES.RECORD_DELETE,
+      aggregateType: AGGREGATE_TYPES.RECORD,
+      aggregateId: id,
+      actor: '操作员',
+      payload: { recordId: id, deletedRecord: record ? { ...record } : null }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(next, reminderSettings, routePlans, riskRules, autoPlanConfig));
+
     persist(next);
     if (selected?.id === id) setSelected(null);
   }
 
   function duplicateRecord(item) {
-    const copied = { ...item, id: uid(), status: appConfig.primaryStatus, timeline: [{ status: appConfig.primaryStatus, at: today, by: '复制' }] };
-    persist([copied, ...records]);
+    const copied = { ...item, id: uid(), status: appConfig.primaryStatus, createdAt: new Date().toISOString(), timeline: [{ status: appConfig.primaryStatus, at: today, by: '复制' }] };
+    const next = [copied, ...records];
+
+    const evt = createEvent({
+      type: EVENT_TYPES.RECORD_DUPLICATE,
+      aggregateType: AGGREGATE_TYPES.RECORD,
+      aggregateId: copied.id,
+      actor: '操作员',
+      payload: { record: { ...copied }, sourceRecordId: item.id }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(next, reminderSettings, routePlans, riskRules, autoPlanConfig));
+
+    persist(next);
     setSelected(copied);
   }
 
@@ -1759,11 +1940,40 @@ function App() {
       if (status !== null) formValues.status = String(status);
     }
     const nextEditForm = { ...editForm, ...formValues };
+
+    const changes = {};
+    Object.keys(nextEditForm).forEach(key => {
+      if (key === 'id' || key === 'createdAt') return;
+      if (nextEditForm[key] !== selected[key]) {
+        changes[key] = nextEditForm[key];
+      }
+    });
+
+    const timelineEntry = { status: nextEditForm.status || selected.status, at: today, by: '编辑' };
     const next = records.map((item) => item.id === selected.id ? {
       ...item,
       ...nextEditForm,
-      timeline: [...(item.timeline || []), { status: nextEditForm.status || item.status, at: today, by: '编辑' }]
+      timeline: [...(item.timeline || []), timelineEntry]
     } : item);
+
+    if (Object.keys(changes).length > 0 || nextEditForm.status !== selected.status) {
+      const evt = createEvent({
+        type: EVENT_TYPES.RECORD_UPDATE,
+        aggregateType: AGGREGATE_TYPES.RECORD,
+        aggregateId: selected.id,
+        actor: '操作员',
+        payload: {
+          recordId: selected.id,
+          changes,
+          previousValues: Object.fromEntries(
+            Object.keys(changes).map(k => [k, selected[k]])
+          ),
+          timelineEntry
+        }
+      });
+      getEventStore().appendEvent(evt, getCurrentFullState(next, reminderSettings, routePlans, riskRules, autoPlanConfig));
+    }
+
     persist(next);
     const updated = next.find((item) => item.id === selected.id);
     setSelected(updated);
@@ -1779,6 +1989,11 @@ function App() {
   }
 
   function handleSaveSettings() {
+    let finalReminderSettings = reminderSettings;
+    let finalRiskRules = riskRules;
+    let finalAutoPlanConfig = autoPlanConfig;
+    const settingsPayload = {};
+
     if (settingsTab === 'reminder') {
       const sanitized = {};
       Object.keys(tempSettings).forEach((key) => {
@@ -1787,6 +2002,8 @@ function App() {
       });
       setReminderSettings(sanitized);
       saveReminderSettings(sanitized);
+      finalReminderSettings = sanitized;
+      settingsPayload.reminderSettings = sanitized;
     } else if (settingsTab === 'risk') {
       const sanitized = {};
       Object.keys(tempRiskRules).forEach((key) => {
@@ -1802,7 +2019,39 @@ function App() {
       });
       setRiskRules(sanitized);
       saveRiskRules(sanitized);
+      finalRiskRules = sanitized;
+      settingsPayload.riskRules = sanitized;
+    } else if (settingsTab === 'autoPlan') {
+      const sanitized = {
+        ...DEFAULT_AUTO_PLAN_CONFIG,
+        ...tempAutoPlanConfig,
+        planDays: Math.max(7, Math.min(90, parseInt(tempAutoPlanConfig.planDays, 10) || 30)),
+        defaultDailyLimit: Math.max(1, Math.min(50, parseInt(tempAutoPlanConfig.defaultDailyLimit, 10) || 5))
+      };
+      if (sanitized.ownerDailyLimits && typeof sanitized.ownerDailyLimits === 'object') {
+        Object.keys(sanitized.ownerDailyLimits).forEach((owner) => {
+          sanitized.ownerDailyLimits[owner] = Math.max(1, Math.min(50, parseInt(sanitized.ownerDailyLimits[owner], 10) || sanitized.defaultDailyLimit));
+        });
+      } else {
+        sanitized.ownerDailyLimits = {};
+      }
+      setAutoPlanConfig(sanitized);
+      saveAutoPlanConfig(sanitized);
+      finalAutoPlanConfig = sanitized;
+      settingsPayload.autoPlanConfig = sanitized;
     }
+
+    if (Object.keys(settingsPayload).length > 0) {
+      const evt = createEvent({
+        type: EVENT_TYPES.SETTINGS_UPDATE,
+        aggregateType: AGGREGATE_TYPES.SETTINGS,
+        aggregateId: settingsTab,
+        actor: '操作员',
+        payload: settingsPayload
+      });
+      getEventStore().appendEvent(evt, getCurrentFullState(records, finalReminderSettings, routePlans, finalRiskRules, finalAutoPlanConfig));
+    }
+
     setShowSettings(false);
   }
 
@@ -1879,19 +2128,105 @@ function App() {
     if (!importValidation?.valid || !importValidation.data) return;
     const { records: newRecords, reminderSettings: newReminderSettings, routePlans: newRoutePlans, riskRules: newRiskRules } = importValidation.data;
 
+    const finalRiskRules = newRiskRules ? { ...DEFAULT_RISK_RULES, ...newRiskRules } : riskRules;
+
+    if (importValidation.eventStream && Array.isArray(importValidation.eventStream.events)) {
+      try {
+        const es = getEventStore();
+        es.clearAll();
+        es.importMergeData(importValidation.eventStream);
+        const rebuilt = es.rebuildState();
+        
+        const rebuiltRecords = migrateRecords(rebuilt.records || newRecords);
+        const rebuiltReminder = rebuilt.reminderSettings || newReminderSettings;
+        const rebuiltRoutes = rebuilt.routePlans || newRoutePlans;
+        const rebuiltRisk = rebuilt.riskRules || finalRiskRules;
+        const rebuiltAutoPlan = rebuilt.autoPlanConfig || autoPlanConfig;
+        
+        persist(rebuiltRecords);
+        setReminderSettings(rebuiltReminder);
+        saveReminderSettings(rebuiltReminder);
+        setRoutePlans(rebuiltRoutes);
+        saveRoutePlans(rebuiltRoutes);
+        setRiskRules(rebuiltRisk);
+        saveRiskRules(rebuiltRisk);
+        setAutoPlanConfig(rebuiltAutoPlan);
+        saveAutoPlanConfig(rebuiltAutoPlan);
+
+        const restoreEvt = createEvent({
+          type: EVENT_TYPES.DATA_RESTORE,
+          aggregateType: AGGREGATE_TYPES.SYSTEM,
+          aggregateId: 'restore_' + Date.now().toString(36),
+          actor: '系统导入',
+          payload: {
+            restoreMode: 'event_sourcing',
+            restoredEventCount: importValidation.eventStream.events.length,
+            restoredSnapshotCount: importValidation.eventStream.snapshots?.length || 0,
+            beforeRecordCount: records.length,
+            afterRecordCount: rebuiltRecords.length,
+            snapshotState: {
+              records: rebuiltRecords,
+              reminderSettings: rebuiltReminder,
+              routePlans: rebuiltRoutes,
+              riskRules: rebuiltRisk,
+              autoPlanConfig: rebuiltAutoPlan
+            }
+          }
+        });
+        getEventStore().appendEvent(restoreEvt, getCurrentFullState(rebuiltRecords, rebuiltReminder, rebuiltRoutes, rebuiltRisk, rebuiltAutoPlan));
+
+        setSelected(null);
+        alert(`数据恢复成功！已重建 ${importValidation.eventStream.events.length} 条历史事件时间线。`);
+        closeDataManager();
+        return;
+      } catch (err) {
+        console.error('Event stream restore failed, falling back to snapshot restore:', err);
+      }
+    }
+
     persist(newRecords);
     setReminderSettings(newReminderSettings);
     saveReminderSettings(newReminderSettings);
     setRoutePlans(newRoutePlans);
     saveRoutePlans(newRoutePlans);
     if (newRiskRules) {
-      const mergedRiskRules = { ...DEFAULT_RISK_RULES, ...newRiskRules };
-      setRiskRules(mergedRiskRules);
-      saveRiskRules(mergedRiskRules);
+      setRiskRules(finalRiskRules);
+      saveRiskRules(finalRiskRules);
+    }
+
+    try {
+      const es = getEventStore();
+      es.clearAll();
+      es.rebuildFromLegacyData({
+        records: newRecords,
+        routePlans: newRoutePlans
+      });
+
+      const restoreEvt = createEvent({
+        type: EVENT_TYPES.DATA_RESTORE,
+        aggregateType: AGGREGATE_TYPES.SYSTEM,
+        aggregateId: 'restore_' + Date.now().toString(36),
+        actor: '系统导入',
+        payload: {
+          restoreMode: 'legacy_upgrade',
+          restoredEventCount: es.getAllEvents().length,
+          beforeRecordCount: records.length,
+          afterRecordCount: newRecords.length,
+          snapshotState: {
+            records: newRecords,
+            reminderSettings: newReminderSettings,
+            routePlans: newRoutePlans,
+            riskRules: finalRiskRules
+          }
+        }
+      });
+      es.appendEvent(restoreEvt, getCurrentFullState(newRecords, newReminderSettings, newRoutePlans, finalRiskRules, autoPlanConfig));
+    } catch (e) {
+      console.warn('Legacy to event upgrade failed:', e);
     }
 
     setSelected(null);
-    alert('数据恢复成功！');
+    alert('数据恢复成功！旧数据已自动升级为事件模型。');
     closeDataManager();
   }
 
@@ -2043,76 +2378,147 @@ function App() {
     
     const snapshot = createDataSnapshot(records, reminderSettings, routePlans);
     
-    const mergedRecords = [];
-    const seenKeys = new Set();
-    
-    if (mergeNoConflicts?.localOnly) {
-      mergeNoConflicts.localOnly.forEach((record) => {
-        const key = getBusinessKey(record);
-        if (!seenKeys.has(key)) {
-          seenKeys.add(key);
-          mergedRecords.push(record);
-        }
-      });
-    }
-    
-    if (mergeNoConflicts?.importOnly) {
-      mergeNoConflicts.importOnly.forEach((record) => {
-        const key = getBusinessKey(record);
-        if (!seenKeys.has(key)) {
-          seenKeys.add(key);
-          mergedRecords.push(record);
-        }
-      });
-    }
-    
-    if (mergeNoConflicts?.autoMergeable) {
-      mergeNoConflicts.autoMergeable.forEach(({ localRecord, importRecord }) => {
-        const key = getBusinessKey(localRecord);
-        if (!seenKeys.has(key)) {
-          seenKeys.add(key);
-          const merged = mergeRecordFields(localRecord, importRecord, null);
-          mergedRecords.push(merged);
-        }
-      });
-    }
-    
-    mergeConflicts.forEach((conflict, index) => {
-      const key = conflict.key;
-      const resolution = conflictResolutions[index];
-      if (resolution && !seenKeys.has(key)) {
-        seenKeys.add(key);
-        const resolvedRecord = resolveConflict(conflict, resolution.resolution, resolution.customMerge);
-        mergedRecords.push(resolvedRecord);
-      }
-    });
-    
-    const finalRecords = migrateRecords(mergedRecords);
-    
-    persist(finalRecords);
-
-    const { reminderSettings: importReminderSettings, routePlans: importRoutePlans, riskRules: importRiskRules } = mergeValidation.data;
+    let isEventBased = !!mergeValidation.eventBasedMerge && !!mergeValidation.eventStream;
+    let finalRecords = [];
     let finalReminderSettings = reminderSettings;
     let finalRoutePlans = routePlans;
-    if (importReminderSettings) {
-      finalReminderSettings = { ...DEFAULT_REMINDER_SETTINGS, ...reminderSettings, ...importReminderSettings };
-      setReminderSettings(finalReminderSettings);
-      saveReminderSettings(finalReminderSettings);
+    let finalRiskRules = riskRules;
+
+    if (isEventBased) {
+      try {
+        const es = getEventStore();
+        const importResult = es.importMergeData(mergeValidation.eventStream);
+        const rebuilt = es.rebuildState();
+        
+        finalRecords = migrateRecords(rebuilt.records || []);
+        finalReminderSettings = rebuilt.reminderSettings || finalReminderSettings;
+        finalRoutePlans = rebuilt.routePlans || {};
+        finalRiskRules = rebuilt.riskRules || finalRiskRules;
+        
+        if (importResult.conflicts && importResult.conflicts.length > 0) {
+          const cw = importResult.conflicts.slice(0, 5).map(c => 
+            `  · ${c.type} - 电梯 ${c.aggregateId?.slice(0, 12)}... (${new Date(c.localEvent?.timestamp).toLocaleString()} vs ${new Date(c.importEvent?.timestamp).toLocaleString()})`
+          ).join('\n');
+          alert(`事件合并完成！检测到 ${importResult.conflicts.length} 条潜在并发修改冲突（5秒时间窗口）：\n\n${cw}\n\n请人工核实相关记录。`);
+        }
+
+        persist(finalRecords);
+        setReminderSettings(finalReminderSettings);
+        saveReminderSettings(finalReminderSettings);
+        setRoutePlans(finalRoutePlans);
+        saveRoutePlans(finalRoutePlans);
+        setRiskRules(finalRiskRules);
+        saveRiskRules(finalRiskRules);
+      } catch (err) {
+        console.error('Event-based merge failed, falling back:', err);
+        isEventBased = false;
+      }
     }
-    if (importRoutePlans) {
-      finalRoutePlans = { ...routePlans, ...importRoutePlans };
-      setRoutePlans(finalRoutePlans);
-      saveRoutePlans(finalRoutePlans);
+
+    if (!isEventBased) {
+      const mergedRecords = [];
+      const seenKeys = new Set();
+      
+      if (mergeNoConflicts?.localOnly) {
+        mergeNoConflicts.localOnly.forEach((record) => {
+          const key = getBusinessKey(record);
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            mergedRecords.push(record);
+          }
+        });
+      }
+      
+      if (mergeNoConflicts?.importOnly) {
+        mergeNoConflicts.importOnly.forEach((record) => {
+          const key = getBusinessKey(record);
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            mergedRecords.push(record);
+          }
+        });
+      }
+      
+      if (mergeNoConflicts?.autoMergeable) {
+        mergeNoConflicts.autoMergeable.forEach(({ localRecord, importRecord }) => {
+          const key = getBusinessKey(localRecord);
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            const merged = mergeRecordFields(localRecord, importRecord, null);
+            mergedRecords.push(merged);
+          }
+        });
+      }
+      
+      mergeConflicts.forEach((conflict, index) => {
+        const key = conflict.key;
+        const resolution = conflictResolutions[index];
+        if (resolution && !seenKeys.has(key)) {
+          seenKeys.add(key);
+          const resolvedRecord = resolveConflict(conflict, resolution.resolution, resolution.customMerge);
+          mergedRecords.push(resolvedRecord);
+        }
+      });
+      
+      finalRecords = migrateRecords(mergedRecords);
+      
+      persist(finalRecords);
+
+      const { reminderSettings: importReminderSettings, routePlans: importRoutePlans, riskRules: importRiskRules } = mergeValidation.data;
+      if (importReminderSettings) {
+        finalReminderSettings = { ...DEFAULT_REMINDER_SETTINGS, ...reminderSettings, ...importReminderSettings };
+        setReminderSettings(finalReminderSettings);
+        saveReminderSettings(finalReminderSettings);
+      }
+      if (importRoutePlans) {
+        finalRoutePlans = { ...routePlans, ...importRoutePlans };
+        setRoutePlans(finalRoutePlans);
+        saveRoutePlans(finalRoutePlans);
+      }
+      if (importRiskRules) {
+        finalRiskRules = { ...DEFAULT_RISK_RULES, ...riskRules, ...importRiskRules };
+        setRiskRules(finalRiskRules);
+        saveRiskRules(finalRiskRules);
+      }
     }
-    if (importRiskRules) {
-      const mergedRiskRules = { ...DEFAULT_RISK_RULES, ...riskRules, ...importRiskRules };
-      setRiskRules(mergedRiskRules);
-      saveRiskRules(mergedRiskRules);
+
+    const conflictResolutionsDetail = mergeConflicts.map((c, i) => ({
+      key: c.key,
+      resolution: conflictResolutions[i]?.resolution || 'unresolved',
+      fieldConflicts: c.fieldConflicts
+    }));
+
+    const mergeEvt = createEvent({
+      type: EVENT_TYPES.MERGE_EXECUTE,
+      aggregateType: AGGREGATE_TYPES.MERGE,
+      aggregateId: 'merge_' + Date.now().toString(36),
+      actor: '操作员',
+      payload: {
+        mergeMode: isEventBased ? 'event_sourcing' : 'record_based',
+        sourceDevice: mergeValidation.deviceInfo || { name: '未知设备' },
+        importedEventCount: mergeValidation.eventStream?.events?.length || 0,
+        importedRecordCount: mergeValidation?.summary?.recordCount || 0,
+        beforeRecordCount: records.length,
+        afterRecordCount: finalRecords.length,
+        conflictCount: mergeConflicts.length,
+        conflictResolutions: conflictResolutionsDetail,
+        snapshotBefore: snapshot
+      }
+    });
+    getEventStore().appendEvent(mergeEvt, getCurrentFullState(finalRecords, finalReminderSettings, finalRoutePlans, finalRiskRules, autoPlanConfig));
+
+    if (!isEventBased && mergeValidation.eventStream && Array.isArray(mergeValidation.eventStream.events) && mergeValidation.eventStream.events.length > 0) {
+      try {
+        getEventStore().importMergeData(mergeValidation.eventStream);
+      } catch (e) {
+        console.warn('Importing event stream after record-based merge failed:', e);
+      }
     }
 
     const mergeHistoryEntry = {
       id: 'merge_' + Math.random().toString(36).slice(2, 12),
       type: 'merge',
+      mergeMode: isEventBased ? 'event_sourcing' : 'record_based',
       timestamp: new Date().toISOString(),
       deviceInfo: deviceInfo || { name: '未知设备', id: '' },
       snapshot: snapshot,
@@ -2128,7 +2534,9 @@ function App() {
     saveMergeHistory(nextHistory);
 
     setSelected(null);
-    alert(`合并完成！共 ${finalRecords.length} 条记录。${importRiskRules ? '风险规则配置已同步更新。' : ''} 已自动创建合并前快照，可在多端合并区域回滚。`);
+    const riskMsg = mergeValidation.data.riskRules ? '风险规则配置已同步更新。' : '';
+    const eventMsg = isEventBased ? `（细粒度事件级合并：${mergeValidation.eventStream.events.length} 条历史事件）` : '';
+    alert(`合并完成！共 ${finalRecords.length} 条记录。${riskMsg} ${eventMsg} 已自动创建合并前快照，可在多端合并区域回滚。`);
     closeDataManager();
   }
 
@@ -2162,11 +2570,33 @@ function App() {
     const beforeReminderCount = Object.keys(reminderSettings).length;
     const beforeRouteCount = Object.keys(routePlans).length;
     
-    persist(snapshot.records);
+    const migratedRecords = migrateRecords(snapshot.records);
+    persist(migratedRecords);
     setReminderSettings(snapshot.reminderSettings);
     saveReminderSettings(snapshot.reminderSettings);
     setRoutePlans(snapshot.routePlans);
     saveRoutePlans(snapshot.routePlans);
+
+    const rbEvt = createEvent({
+      type: EVENT_TYPES.MERGE_ROLLBACK,
+      aggregateType: AGGREGATE_TYPES.MERGE,
+      aggregateId: rollbackTarget.id,
+      actor: '操作员',
+      payload: {
+        rollbackTargetId: rollbackTarget.id,
+        rollbackTargetTimestamp: rollbackTarget.timestamp,
+        rollbackTargetMergeMode: rollbackTarget.mergeMode,
+        beforeRecordCount,
+        afterRecordCount: migratedRecords.length,
+        sourceDevice: rollbackTarget.deviceInfo,
+        snapshotState: {
+          records: migratedRecords,
+          reminderSettings: snapshot.reminderSettings,
+          routePlans: snapshot.routePlans
+        }
+      }
+    });
+    getEventStore().appendEvent(rbEvt, getCurrentFullState(migratedRecords, snapshot.reminderSettings, snapshot.routePlans, riskRules, autoPlanConfig));
     
     const rollbackEntry = {
       id: 'rollback_' + Math.random().toString(36).slice(2, 12),
@@ -2177,7 +2607,7 @@ function App() {
       deviceInfo: rollbackTarget.deviceInfo,
       summary: {
         beforeRecordCount,
-        afterRecordCount: snapshot.records.length,
+        afterRecordCount: migratedRecords.length,
         beforeReminderCount,
         afterReminderCount: Object.keys(snapshot.reminderSettings).length,
         beforeRouteCount,
@@ -2427,6 +2857,32 @@ function App() {
 
     setAutoPlanDraft(draft);
     saveAutoPlanDraft(draft);
+
+    const genEvt = createEvent({
+      type: EVENT_TYPES.AUTO_PLAN_GENERATE,
+      aggregateType: AGGREGATE_TYPES.AUTO_PLAN,
+      aggregateId: draft.id,
+      actor: '自动计划生成器',
+      payload: {
+        planDays: config.planDays || 30,
+        allowAdvanceScheduling: !!config.allowAdvanceScheduling,
+        maxAdvanceDays: config.maxAdvanceDays || 0,
+        estateConcentration: !!config.estateConcentration,
+        defaultDailyLimit: config.defaultDailyLimit || 0,
+        ownerLimitCount: Object.keys(config.ownerDailyLimits || {}).length,
+        candidateCount: scoredRecords.length,
+        totalCount: draftItems.length,
+        unassignedCount: unassignedItems.length,
+        dayCount: dates.length,
+        byOwnerCount: Object.fromEntries(
+          Object.entries(
+            draftItems.reduce((acc, it) => { acc[it.owner] = (acc[it.owner] || 0) + 1; return acc; }, {})
+          )
+        )
+      }
+    });
+    getEventStore().appendEvent(genEvt, getCurrentFullState(records, reminderSettings, routePlans, riskRules, autoPlanConfig));
+
     return draft;
   }
 
@@ -2435,6 +2891,7 @@ function App() {
 
     let movedItem = null;
     let oldDate = null;
+    let oldOwner = null;
 
     const newDates = { ...autoPlanDraft.dates };
     Object.keys(newDates).forEach((date) => {
@@ -2443,6 +2900,7 @@ function App() {
       if (idx !== -1) {
         movedItem = { ...items[idx] };
         oldDate = date;
+        oldOwner = movedItem.owner;
         items.splice(idx, 1);
       }
     });
@@ -2473,13 +2931,39 @@ function App() {
     };
     setAutoPlanDraft(newDraft);
     saveAutoPlanDraft(newDraft);
+
+    const evt = createEvent({
+      type: EVENT_TYPES.AUTO_PLAN_ITEM_MOVE,
+      aggregateType: AGGREGATE_TYPES.AUTO_PLAN,
+      aggregateId: autoPlanDraft.id || 'current_draft',
+      actor: '操作员',
+      payload: {
+        planId,
+        recordId: movedItem.recordId,
+        elevatorNo: movedItem.elevatorNo,
+        deviceId: movedItem.deviceId,
+        fromDate: oldDate,
+        toDate: newDate,
+        fromOwner: oldOwner,
+        toOwner: movedItem.owner
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, routePlans, riskRules, autoPlanConfig));
   }
 
   function removePlanItem(planId) {
     if (!autoPlanDraft) return;
 
+    let removedItem = null;
+    let removedDate = null;
+
     const newDates = { ...autoPlanDraft.dates };
     Object.keys(newDates).forEach((date) => {
+      const item = newDates[date].find((it) => it.planId === planId);
+      if (item) {
+        removedItem = item;
+        removedDate = date;
+      }
       newDates[date] = newDates[date].filter((it) => it.planId !== planId);
     });
 
@@ -2491,6 +2975,25 @@ function App() {
     };
     setAutoPlanDraft(newDraft);
     saveAutoPlanDraft(newDraft);
+
+    if (removedItem) {
+      const evt = createEvent({
+        type: EVENT_TYPES.AUTO_PLAN_ITEM_REMOVE,
+        aggregateType: AGGREGATE_TYPES.AUTO_PLAN,
+        aggregateId: autoPlanDraft.id || 'current_draft',
+        actor: '操作员',
+        payload: {
+          planId,
+          recordId: removedItem.recordId,
+          elevatorNo: removedItem.elevatorNo,
+          deviceId: removedItem.deviceId,
+          plannedDate: removedDate,
+          owner: removedItem.owner,
+          estate: removedItem.estate
+        }
+      });
+      getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, routePlans, riskRules, autoPlanConfig));
+    }
   }
 
   function discardPlanDraft() {
@@ -2744,8 +3247,6 @@ function App() {
     });
 
     const finalRecords = Array.from(updatedRecordsMap.values());
-    persist(finalRecords);
-    persistRoutePlans(newRoutePlans);
 
     const actualAffectedCount = globalDeviceFirstSeen.size;
     const actualDayCount = new Set(
@@ -2754,6 +3255,60 @@ function App() {
 
     const finalValidation = validatePlanDraft(autoPlanDraft);
     const warningCount = finalValidation.warnings.length;
+
+    const recordUpdates = [];
+    globalDeviceFirstSeen.forEach((date, recordId) => {
+      const original = records.find(r => r.id === recordId);
+      const updated = finalRecords.find(r => r.id === recordId);
+      if (original && updated) {
+        const changes = {};
+        ['nextDate', 'status', 'owner'].forEach(k => {
+          if (original[k] !== updated[k]) changes[k] = updated[k];
+        });
+        const tlEntry = updated.timeline && updated.timeline.length > 0
+          ? updated.timeline[updated.timeline.length - 1]
+          : null;
+        recordUpdates.push({
+          recordId,
+          changes,
+          previousValues: Object.fromEntries(
+            Object.keys(changes).map(k => [k, original[k]])
+          ),
+          timelineEntries: tlEntry ? [tlEntry] : []
+        });
+      }
+    });
+
+    const mergeRoutePlansData = {};
+    Object.entries(newRoutePlans).forEach(([date, plan]) => {
+      if (date && plan?.routes && plan.routes.length > 0) {
+        mergeRoutePlansData[date] = { date, routes: plan.routes, updatedAt: plan.updatedAt };
+      }
+    });
+
+    const confirmEvt = createEvent({
+      type: EVENT_TYPES.AUTO_PLAN_CONFIRM,
+      aggregateType: AGGREGATE_TYPES.AUTO_PLAN,
+      aggregateId: autoPlanDraft.id,
+      actor: '自动计划生成器',
+      payload: {
+        planId: autoPlanDraft.id,
+        affectedCount: actualAffectedCount,
+        skippedCount: skippedItems.length,
+        dayCount: actualDayCount,
+        recordUpdates,
+        routePlans: mergeRoutePlansData,
+        validationWarnings: warningCount > 0 ? finalValidation.warnings.slice(0, 20).map(w => ({
+          type: w.type, title: w.title, description: w.description,
+          date: w.date, owner: w.owner, count: w.count, limit: w.limit
+        })) : [],
+        skippedItems: skippedItems.slice(0, 50)
+      }
+    });
+    getEventStore().appendEvent(confirmEvt, getCurrentFullState(finalRecords, reminderSettings, newRoutePlans, riskRules, autoPlanConfig));
+
+    persist(finalRecords);
+    persistRoutePlans(newRoutePlans);
     const warningSummary = warningCount > 0 ? finalValidation.warnings.slice(0, 20).map(w => ({
       type: w.type,
       title: w.title,
@@ -2819,16 +3374,38 @@ function App() {
     if (!entry) return;
     if (!confirm(`确定要回滚此操作吗？\n\n${entry.description}\n\n系统将恢复操作前的所有记录和路线方案状态。`)) return;
 
+    let finalRecords = records;
+    let finalRoutePlans = routePlans;
+
     if (entry.snapshot?.records) {
       const migrated = migrateRecords(entry.snapshot.records);
       localStorage.setItem(appConfig.storage, JSON.stringify(migrated));
       setRecords(migrated);
+      finalRecords = migrated;
     }
 
     if (entry.snapshot?.routePlans) {
       saveRoutePlans(entry.snapshot.routePlans);
       setRoutePlans(entry.snapshot.routePlans);
+      finalRoutePlans = entry.snapshot.routePlans;
     }
+
+    const evt = createEvent({
+      type: EVENT_TYPES.AUTO_PLAN_ROLLBACK,
+      aggregateType: AGGREGATE_TYPES.AUTO_PLAN,
+      aggregateId: entryId,
+      actor: '操作员',
+      payload: {
+        relatedPlanConfirmId: entry.planId || entryId,
+        description: entry.description,
+        affectedCount: entry.affectedCount || 0,
+        snapshotState: {
+          records: finalRecords,
+          routePlans: finalRoutePlans
+        }
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(finalRecords, reminderSettings, finalRoutePlans, riskRules, autoPlanConfig));
 
     const rollbackEntry = {
       id: planUid(),
@@ -2879,6 +3456,34 @@ function App() {
     } else {
       sanitized.ownerDailyLimits = {};
     }
+
+    const changedKeys = [];
+    const previousValues = {};
+    Object.keys(sanitized).forEach((key) => {
+      const prev = JSON.stringify(autoPlanConfig[key] ?? null);
+      const curr = JSON.stringify(sanitized[key] ?? null);
+      if (prev !== curr) {
+        changedKeys.push(key);
+        previousValues[key] = autoPlanConfig[key] ?? null;
+      }
+    });
+
+    if (changedKeys.length > 0) {
+      const evt = createEvent({
+        type: EVENT_TYPES.SETTINGS_UPDATE,
+        aggregateType: AGGREGATE_TYPES.SETTINGS,
+        aggregateId: 'auto_plan_config',
+        actor: '操作员',
+        payload: {
+          settingsTab: 'autoPlan',
+          changedKeys,
+          previousValues,
+          newValues: Object.fromEntries(changedKeys.map((k) => [k, sanitized[k]]))
+        }
+      });
+      getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, routePlans, riskRules, sanitized));
+    }
+
     setAutoPlanConfig(sanitized);
     saveAutoPlanConfig(sanitized);
     setShowAutoPlanConfig(false);
@@ -3241,10 +3846,25 @@ function App() {
       routes: [...currentRoutePlan.routes, newRoute],
       updatedAt: new Date().toISOString()
     };
-    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+    const nextPlans = { ...routePlans, [selectedRouteDate]: nextPlan };
+
+    const evt = createEvent({
+      type: EVENT_TYPES.ROUTE_CREATE,
+      aggregateType: AGGREGATE_TYPES.ROUTE_PLAN,
+      aggregateId: selectedRouteDate,
+      actor: '操作员',
+      payload: {
+        date: selectedRouteDate,
+        routePlansPatch: { routesToAdd: [newRoute] }
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, nextPlans, riskRules, autoPlanConfig));
+
+    persistRoutePlans(nextPlans);
   }
 
   function renameRoute(routeId, newName) {
+    const oldRoute = currentRoutePlan.routes.find(r => r.id === routeId);
     const nextPlan = {
       ...currentRoutePlan,
       routes: currentRoutePlan.routes.map((r) =>
@@ -3252,16 +3872,50 @@ function App() {
       ),
       updatedAt: new Date().toISOString()
     };
-    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+    const nextPlans = { ...routePlans, [selectedRouteDate]: nextPlan };
+
+    const evt = createEvent({
+      type: EVENT_TYPES.ROUTE_RENAME,
+      aggregateType: AGGREGATE_TYPES.ROUTE_PLAN,
+      aggregateId: selectedRouteDate,
+      actor: '操作员',
+      payload: {
+        date: selectedRouteDate,
+        routeId,
+        previousName: oldRoute?.estate,
+        newName,
+        routePlansPatch: { routesToUpdate: [{ id: routeId, estate: newName }] }
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, nextPlans, riskRules, autoPlanConfig));
+
+    persistRoutePlans(nextPlans);
   }
 
   function removeRoute(routeId) {
+    const removedRoute = currentRoutePlan.routes.find(r => r.id === routeId);
     const nextPlan = {
       ...currentRoutePlan,
       routes: currentRoutePlan.routes.filter((r) => r.id !== routeId),
       updatedAt: new Date().toISOString()
     };
-    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+    const nextPlans = { ...routePlans, [selectedRouteDate]: nextPlan };
+
+    const evt = createEvent({
+      type: EVENT_TYPES.ROUTE_DELETE,
+      aggregateType: AGGREGATE_TYPES.ROUTE_PLAN,
+      aggregateId: selectedRouteDate,
+      actor: '操作员',
+      payload: {
+        date: selectedRouteDate,
+        routeId,
+        removedRoute: removedRoute ? { ...removedRoute } : null,
+        routePlansPatch: { routeIdsToRemove: [routeId] }
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, nextPlans, riskRules, autoPlanConfig));
+
+    persistRoutePlans(nextPlans);
   }
 
   function addDeviceToRoute(deviceId, routeId) {
@@ -3274,7 +3928,29 @@ function App() {
       ),
       updatedAt: new Date().toISOString()
     };
-    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+    const nextPlans = { ...routePlans, [selectedRouteDate]: nextPlan };
+
+    const record = records.find(r => r.id === deviceId);
+    const evt = createEvent({
+      type: EVENT_TYPES.ROUTE_ADD_DEVICE,
+      aggregateType: AGGREGATE_TYPES.ROUTE_PLAN,
+      aggregateId: selectedRouteDate,
+      actor: '操作员',
+      payload: {
+        date: selectedRouteDate,
+        routeId,
+        deviceId,
+        deviceInfo: record ? { elevatorNo: record.elevatorNo, estate: record.estate } : null,
+        routePlansPatch: {
+          routesToUpdate: currentRoutePlan.routes
+            .filter(r => r.id === routeId && !r.deviceIds.includes(deviceId))
+            .map(r => ({ id: r.id, deviceIds: [...r.deviceIds, deviceId] }))
+        }
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, nextPlans, riskRules, autoPlanConfig));
+
+    persistRoutePlans(nextPlans);
   }
 
   function removeDeviceFromRoute(deviceId, routeId) {
@@ -3287,7 +3963,29 @@ function App() {
       ),
       updatedAt: new Date().toISOString()
     };
-    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+    const nextPlans = { ...routePlans, [selectedRouteDate]: nextPlan };
+
+    const record = records.find(r => r.id === deviceId);
+    const evt = createEvent({
+      type: EVENT_TYPES.ROUTE_REMOVE_DEVICE,
+      aggregateType: AGGREGATE_TYPES.ROUTE_PLAN,
+      aggregateId: selectedRouteDate,
+      actor: '操作员',
+      payload: {
+        date: selectedRouteDate,
+        routeId,
+        deviceId,
+        deviceInfo: record ? { elevatorNo: record.elevatorNo, estate: record.estate } : null,
+        routePlansPatch: {
+          routesToUpdate: currentRoutePlan.routes
+            .filter(r => r.id === routeId)
+            .map(r => ({ id: r.id, deviceIds: r.deviceIds.filter(id => id !== deviceId) }))
+        }
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, nextPlans, riskRules, autoPlanConfig));
+
+    persistRoutePlans(nextPlans);
   }
 
   function moveDeviceInRoute(deviceId, routeId, direction) {
@@ -3306,7 +4004,26 @@ function App() {
       ),
       updatedAt: new Date().toISOString()
     };
-    persistRoutePlans({ ...routePlans, [selectedRouteDate]: nextPlan });
+    const nextPlans = { ...routePlans, [selectedRouteDate]: nextPlan };
+
+    const evt = createEvent({
+      type: EVENT_TYPES.ROUTE_REORDER_DEVICE,
+      aggregateType: AGGREGATE_TYPES.ROUTE_PLAN,
+      aggregateId: selectedRouteDate,
+      actor: '操作员',
+      payload: {
+        date: selectedRouteDate,
+        routeId,
+        deviceId,
+        fromIndex: idx,
+        toIndex: newIdx,
+        direction,
+        routePlansPatch: { routesToUpdate: [{ id: routeId, deviceIds: newDeviceIds }] }
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, nextPlans, riskRules, autoPlanConfig));
+
+    persistRoutePlans(nextPlans);
   }
 
   function toggleEstate(estate) {
@@ -3322,7 +4039,23 @@ function App() {
       ...currentRoutePlan,
       updatedAt: new Date().toISOString()
     };
-    persistRoutePlans({ ...routePlans, [selectedRouteDate]: finalPlan });
+    const nextPlans = { ...routePlans, [selectedRouteDate]: finalPlan };
+
+    const evt = createEvent({
+      type: EVENT_TYPES.ROUTE_PLAN_SAVE,
+      aggregateType: AGGREGATE_TYPES.ROUTE_PLAN,
+      aggregateId: selectedRouteDate,
+      actor: '操作员',
+      payload: {
+        date: selectedRouteDate,
+        routeCount: finalPlan.routes.length,
+        deviceCount: finalPlan.routes.reduce((sum, r) => sum + r.deviceIds.length, 0),
+        routePlansPatch: { replaceAll: { ...finalPlan } }
+      }
+    });
+    getEventStore().appendEvent(evt, getCurrentFullState(records, reminderSettings, nextPlans, riskRules, autoPlanConfig));
+
+    persistRoutePlans(nextPlans);
     alert('路线方案已保存！');
   }
 
