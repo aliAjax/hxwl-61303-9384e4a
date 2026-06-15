@@ -92,40 +92,66 @@ function emptyEventStoreState() {
 }
 
 function loadEventStore() {
-  const raw = localStorage.getItem(EVENT_STORE_STORAGE_KEY);
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.events)) {
-        return {
-          ...emptyEventStoreState(),
-          ...parsed,
-          events: parsed.events || [],
-          snapshots: parsed.snapshots || [],
-          eventCount: (parsed.events || []).length,
-          lastEventId: (parsed.events && parsed.events.length > 0)
-            ? parsed.events[parsed.events.length - 1].id
-            : null
-        };
+  try {
+    const raw = localStorage.getItem(EVENT_STORE_STORAGE_KEY);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.events)) {
+          return {
+            ...emptyEventStoreState(),
+            ...parsed,
+            events: parsed.events || [],
+            snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots : [],
+            eventCount: (parsed.events || []).length,
+            lastEventId: (parsed.events && parsed.events.length > 0)
+              ? parsed.events[parsed.events.length - 1].id
+              : null
+          };
+        }
+      } catch (e) {
+        console.warn('[EventStore] 存储数据损坏，正在重新初始化', e);
       }
-    } catch (e) {
-      console.warn('Event store corrupted, reinitializing', e);
     }
+  } catch (e) {
+    console.warn('[EventStore] localStorage 不可用，使用内存存储', e);
   }
   return emptyEventStoreState();
 }
 
 function saveEventStore(state) {
-  const toSave = {
-    version: state.version,
-    appId: state.appId,
-    deviceId: state.deviceId,
-    events: state.events,
-    snapshots: state.snapshots,
-    lastEventId: state.lastEventId,
-    eventCount: state.eventCount
-  };
-  localStorage.setItem(EVENT_STORE_STORAGE_KEY, JSON.stringify(toSave));
+  try {
+    const toSave = {
+      version: state.version,
+      appId: state.appId,
+      deviceId: state.deviceId,
+      events: state.events,
+      snapshots: state.snapshots,
+      lastEventId: state.lastEventId,
+      eventCount: state.eventCount
+    };
+    localStorage.setItem(EVENT_STORE_STORAGE_KEY, JSON.stringify(toSave));
+  } catch (e) {
+    console.warn('[EventStore] 保存失败（可能存储空间不足）:', e);
+    if (state.snapshots && state.snapshots.length > 1) {
+      try {
+        state.snapshots = state.snapshots.slice(-2);
+        const toSave = {
+          version: state.version,
+          appId: state.appId,
+          deviceId: state.deviceId,
+          events: state.events,
+          snapshots: state.snapshots,
+          lastEventId: state.lastEventId,
+          eventCount: state.eventCount
+        };
+        localStorage.setItem(EVENT_STORE_STORAGE_KEY, JSON.stringify(toSave));
+        console.info('[EventStore] 已裁剪快照后重新保存');
+      } catch (e2) {
+        console.error('[EventStore] 裁剪后仍无法保存:', e2);
+      }
+    }
+  }
 }
 
 function createSnapshot(state, currentState) {
@@ -211,35 +237,122 @@ function applyBackfill(state, event) {
 }
 
 function applyRoutePlanChanges(state, event) {
-  const { date, routePlansPatch } = event.payload;
-  if (!date || !routePlansPatch) return state;
+  const { date } = event.payload;
+  if (!date) return state;
 
   const currentPlan = state.routePlans[date] || { date, routes: [], updatedAt: null };
-  let nextPlan = { ...currentPlan };
+  let nextRoutes = [...currentPlan.routes];
 
-  if (routePlansPatch.replaceAll !== undefined) {
-    nextPlan = { ...routePlansPatch.replaceAll };
-  } else {
-    if (routePlansPatch.routesToAdd) {
-      nextPlan.routes = [...nextPlan.routes, ...routePlansPatch.routesToAdd];
+  switch (event.type) {
+    case EVENT_TYPES.ROUTE_CREATE:
+    case EVENT_TYPES.ROUTE_PLAN_CREATE: {
+      if (event.payload.routePlansPatch && event.payload.routePlansPatch.routesToAdd) {
+        const existingIds = new Set(nextRoutes.map(r => r.id));
+        event.payload.routePlansPatch.routesToAdd.forEach(r => {
+          if (!existingIds.has(r.id)) {
+            nextRoutes.push({ ...r });
+            existingIds.add(r.id);
+          }
+        });
+      }
+      break;
     }
-    if (routePlansPatch.routesToUpdate) {
-      const updateMap = new Map(routePlansPatch.routesToUpdate.map(r => [r.id, r]));
-      nextPlan.routes = nextPlan.routes.map(r => updateMap.has(r.id) ? { ...r, ...updateMap.get(r) } : r);
+
+    case EVENT_TYPES.ROUTE_RENAME: {
+      const { routeId, newName } = event.payload;
+      if (routeId && newName) {
+        nextRoutes = nextRoutes.map(r =>
+          r.id === routeId ? { ...r, estate: newName } : r
+        );
+      }
+      break;
     }
-    if (routePlansPatch.routeIdsToRemove) {
-      const removeSet = new Set(routePlansPatch.routeIdsToRemove);
-      nextPlan.routes = nextPlan.routes.filter(r => !removeSet.has(r.id));
+
+    case EVENT_TYPES.ROUTE_DELETE: {
+      const { routeId } = event.payload;
+      if (routeId) {
+        nextRoutes = nextRoutes.filter(r => r.id !== routeId);
+      } else if (event.payload.routePlansPatch && event.payload.routePlansPatch.routeIdsToRemove) {
+        const removeSet = new Set(event.payload.routePlansPatch.routeIdsToRemove);
+        nextRoutes = nextRoutes.filter(r => !removeSet.has(r.id));
+      }
+      break;
     }
+
+    case EVENT_TYPES.ROUTE_ADD_DEVICE: {
+      const { routeId, deviceId } = event.payload;
+      if (routeId && deviceId) {
+        nextRoutes = nextRoutes.map(r => {
+          if (r.id !== routeId) return r;
+          if (r.deviceIds.includes(deviceId)) return r;
+          return { ...r, deviceIds: [...r.deviceIds, deviceId] };
+        });
+      }
+      break;
+    }
+
+    case EVENT_TYPES.ROUTE_REMOVE_DEVICE: {
+      const { routeId, deviceId } = event.payload;
+      if (routeId && deviceId) {
+        nextRoutes = nextRoutes.map(r => {
+          if (r.id !== routeId) return r;
+          return { ...r, deviceIds: r.deviceIds.filter(id => id !== deviceId) };
+        });
+      }
+      break;
+    }
+
+    case EVENT_TYPES.ROUTE_REORDER_DEVICE: {
+      const { routeId, fromIndex, toIndex } = event.payload;
+      if (routeId && typeof fromIndex === 'number' && typeof toIndex === 'number') {
+        nextRoutes = nextRoutes.map(r => {
+          if (r.id !== routeId) return r;
+          const ids = [...r.deviceIds];
+          if (fromIndex < 0 || fromIndex >= ids.length || toIndex < 0 || toIndex >= ids.length) return r;
+          [ids[fromIndex], ids[toIndex]] = [ids[toIndex], ids[fromIndex]];
+          return { ...r, deviceIds: ids };
+        });
+      }
+      break;
+    }
+
+    case EVENT_TYPES.ROUTE_PLAN_SAVE: {
+      const { routePlansPatch } = event.payload;
+      if (routePlansPatch) {
+        if (routePlansPatch.replaceAll !== undefined) {
+          nextRoutes = [...(routePlansPatch.replaceAll.routes || [])];
+        } else {
+          if (routePlansPatch.routesToAdd) {
+            const existingIds = new Set(nextRoutes.map(r => r.id));
+            routePlansPatch.routesToAdd.forEach(r => {
+              if (!existingIds.has(r.id)) {
+                nextRoutes.push({ ...r });
+                existingIds.add(r.id);
+              }
+            });
+          }
+          if (routePlansPatch.routeIdsToRemove) {
+            const removeSet = new Set(routePlansPatch.routeIdsToRemove);
+            nextRoutes = nextRoutes.filter(r => !removeSet.has(r.id));
+          }
+        }
+      }
+      break;
+    }
+
+    default:
+      break;
   }
-
-  nextPlan.updatedAt = event.timestamp;
 
   return {
     ...state,
     routePlans: {
       ...state.routePlans,
-      [date]: nextPlan
+      [date]: {
+        ...currentPlan,
+        routes: nextRoutes,
+        updatedAt: event.timestamp
+      }
     }
   };
 }
@@ -264,23 +377,23 @@ function applyAutoPlanConfirm(state, event) {
   if (routePlans) {
     Object.entries(routePlans).forEach(([date, plan]) => {
       const existing = nextRoutePlans[date] || { date, routes: [], updatedAt: null };
+      let nextRoutes = [...(existing.routes || [])];
       if (plan.routes) {
-        const existingRouteMap = new Map((existing.routes || []).map(r => [r.estate, r]));
         plan.routes.forEach(newRoute => {
-          const existingRoute = existingRouteMap.get(newRoute.estate);
-          if (existingRoute) {
+          const existingIdx = nextRoutes.findIndex(r => r.estate === newRoute.estate);
+          if (existingIdx !== -1) {
+            const existingRoute = nextRoutes[existingIdx];
             const mergedDeviceIds = [...existingRoute.deviceIds];
             newRoute.deviceIds.forEach(id => {
               if (!mergedDeviceIds.includes(id)) mergedDeviceIds.push(id);
             });
-            existingRoute.deviceIds = mergedDeviceIds;
+            nextRoutes[existingIdx] = { ...existingRoute, deviceIds: mergedDeviceIds };
           } else {
-            existing.routes = [...(existing.routes || []), { ...newRoute }];
+            nextRoutes.push({ ...newRoute });
           }
         });
       }
-      existing.updatedAt = event.timestamp;
-      nextRoutePlans[date] = existing;
+      nextRoutePlans[date] = { ...existing, routes: nextRoutes, updatedAt: event.timestamp };
     });
   }
 
@@ -292,39 +405,24 @@ function applyAutoPlanConfirm(state, event) {
 }
 
 function applyMergeExecute(state, event) {
-  const { mergedRecords, mergedRoutePlans } = event.payload;
-  if (!mergedRecords) return state;
-
-  const localMap = new Map(state.records.map(r => [r.businessKey || r.id, r]));
-  const finalRecords = [...state.records];
-  const seenKeys = new Set();
-
-  mergedRecords.forEach(importRecord => {
-    const key = importRecord.businessKey || importRecord.id;
-    const local = localMap.get(key);
-    seenKeys.add(key);
-    if (local) {
-      const idx = finalRecords.findIndex(r => r.id === local.id);
-      if (idx !== -1) {
-        finalRecords[idx] = importRecord;
-      }
-    } else {
-      finalRecords.push(importRecord);
-    }
-  });
-
-  let finalRoutePlans = { ...state.routePlans };
-  if (mergedRoutePlans) {
-    Object.entries(mergedRoutePlans).forEach(([date, plan]) => {
-      finalRoutePlans[date] = plan;
-    });
+  const { snapshotBefore } = event.payload;
+  if (!snapshotBefore) return state;
+  if (snapshotBefore.records) {
+    state = { ...state, records: JSON.parse(JSON.stringify(snapshotBefore.records)) };
   }
-
-  return {
-    ...state,
-    records: finalRecords,
-    routePlans: finalRoutePlans
-  };
+  if (snapshotBefore.routePlans) {
+    state = { ...state, routePlans: JSON.parse(JSON.stringify(snapshotBefore.routePlans)) };
+  }
+  if (snapshotBefore.reminderSettings) {
+    state = { ...state, reminderSettings: { ...state.reminderSettings, ...snapshotBefore.reminderSettings } };
+  }
+  if (snapshotBefore.riskRules) {
+    state = { ...state, riskRules: { ...state.riskRules, ...snapshotBefore.riskRules } };
+  }
+  if (snapshotBefore.autoPlanConfig) {
+    state = { ...state, autoPlanConfig: { ...state.autoPlanConfig, ...snapshotBefore.autoPlanConfig } };
+  }
+  return state;
 }
 
 function applySettingsUpdate(state, event) {
@@ -360,53 +458,81 @@ function replayEvents(events, baseState = null) {
   };
 
   for (const event of events) {
-    switch (event.type) {
-      case EVENT_TYPES.RECORD_CREATE:
-      case EVENT_TYPES.RECORD_DUPLICATE:
-        state = applyRecordCreate(state, event);
-        break;
-      case EVENT_TYPES.RECORD_UPDATE:
-        state = applyRecordUpdate(state, event);
-        break;
-      case EVENT_TYPES.RECORD_DELETE:
-        state = applyRecordDelete(state, event);
-        break;
-      case EVENT_TYPES.STATUS_TRANSITION:
-        state = applyStatusTransition(state, event);
-        break;
-      case EVENT_TYPES.BACKFILL_COMPLETE:
-      case EVENT_TYPES.BACKFILL_WITH_NEXT_CYCLE:
-        state = applyBackfill(state, event);
-        break;
-      case EVENT_TYPES.ROUTE_PLAN_CREATE:
-      case EVENT_TYPES.ROUTE_CREATE:
-      case EVENT_TYPES.ROUTE_RENAME:
-      case EVENT_TYPES.ROUTE_DELETE:
-      case EVENT_TYPES.ROUTE_ADD_DEVICE:
-      case EVENT_TYPES.ROUTE_REMOVE_DEVICE:
-      case EVENT_TYPES.ROUTE_REORDER_DEVICE:
-      case EVENT_TYPES.ROUTE_PLAN_SAVE:
-        state = applyRoutePlanChanges(state, event);
-        break;
-      case EVENT_TYPES.AUTO_PLAN_CONFIRM:
-        state = applyAutoPlanConfirm(state, event);
-        break;
-      case EVENT_TYPES.MERGE_EXECUTE:
-        state = applyMergeExecute(state, event);
-        break;
-      case EVENT_TYPES.DATA_RESTORE:
-        if (event.payload.snapshotState) {
-          state = JSON.parse(JSON.stringify(event.payload.snapshotState));
-        }
-        break;
-      case EVENT_TYPES.SETTINGS_UPDATE:
-        state = applySettingsUpdate(state, event);
-        break;
-      case EVENT_TYPES.BULK_IMPORT:
-        state = applyBulkImport(state, event);
-        break;
-      default:
-        break;
+    try {
+      switch (event.type) {
+        case EVENT_TYPES.RECORD_CREATE:
+        case EVENT_TYPES.RECORD_DUPLICATE:
+          state = applyRecordCreate(state, event);
+          break;
+        case EVENT_TYPES.RECORD_UPDATE:
+          state = applyRecordUpdate(state, event);
+          break;
+        case EVENT_TYPES.RECORD_DELETE:
+          state = applyRecordDelete(state, event);
+          break;
+        case EVENT_TYPES.STATUS_TRANSITION:
+          state = applyStatusTransition(state, event);
+          break;
+        case EVENT_TYPES.BACKFILL_COMPLETE:
+        case EVENT_TYPES.BACKFILL_WITH_NEXT_CYCLE:
+          state = applyBackfill(state, event);
+          break;
+        case EVENT_TYPES.ROUTE_PLAN_CREATE:
+        case EVENT_TYPES.ROUTE_CREATE:
+        case EVENT_TYPES.ROUTE_RENAME:
+        case EVENT_TYPES.ROUTE_DELETE:
+        case EVENT_TYPES.ROUTE_ADD_DEVICE:
+        case EVENT_TYPES.ROUTE_REMOVE_DEVICE:
+        case EVENT_TYPES.ROUTE_REORDER_DEVICE:
+        case EVENT_TYPES.ROUTE_PLAN_SAVE:
+          state = applyRoutePlanChanges(state, event);
+          break;
+        case EVENT_TYPES.AUTO_PLAN_CONFIRM:
+          state = applyAutoPlanConfirm(state, event);
+          break;
+        case EVENT_TYPES.AUTO_PLAN_GENERATE:
+        case EVENT_TYPES.AUTO_PLAN_ITEM_MOVE:
+        case EVENT_TYPES.AUTO_PLAN_ITEM_REMOVE:
+          break;
+        case EVENT_TYPES.AUTO_PLAN_ROLLBACK:
+        case EVENT_TYPES.MERGE_ROLLBACK:
+          if (event.payload.snapshotState) {
+            const snap = event.payload.snapshotState;
+            state = {
+              records: Array.isArray(snap.records) ? JSON.parse(JSON.stringify(snap.records)) : state.records,
+              routePlans: snap.routePlans ? JSON.parse(JSON.stringify(snap.routePlans)) : state.routePlans,
+              reminderSettings: snap.reminderSettings ? { ...state.reminderSettings, ...snap.reminderSettings } : state.reminderSettings,
+              riskRules: snap.riskRules ? { ...state.riskRules, ...snap.riskRules } : state.riskRules,
+              autoPlanConfig: snap.autoPlanConfig ? { ...state.autoPlanConfig, ...snap.autoPlanConfig } : state.autoPlanConfig
+            };
+          }
+          break;
+        case EVENT_TYPES.MERGE_EXECUTE:
+          state = applyMergeExecute(state, event);
+          break;
+        case EVENT_TYPES.DATA_RESTORE:
+          if (event.payload.snapshotState) {
+            const snap = event.payload.snapshotState;
+            state = {
+              records: Array.isArray(snap.records) ? JSON.parse(JSON.stringify(snap.records)) : state.records,
+              routePlans: snap.routePlans ? JSON.parse(JSON.stringify(snap.routePlans)) : state.routePlans,
+              reminderSettings: snap.reminderSettings ? { ...state.reminderSettings, ...snap.reminderSettings } : state.reminderSettings,
+              riskRules: snap.riskRules ? { ...state.riskRules, ...snap.riskRules } : state.riskRules,
+              autoPlanConfig: snap.autoPlanConfig ? { ...state.autoPlanConfig, ...snap.autoPlanConfig } : state.autoPlanConfig
+            };
+          }
+          break;
+        case EVENT_TYPES.SETTINGS_UPDATE:
+          state = applySettingsUpdate(state, event);
+          break;
+        case EVENT_TYPES.BULK_IMPORT:
+          state = applyBulkImport(state, event);
+          break;
+        default:
+          break;
+      }
+    } catch (err) {
+      console.warn(`[EventStore] replay event ${event.id} (${event.type}) failed:`, err);
     }
   }
 
@@ -438,7 +564,12 @@ function rebuildFromEventStore(store, appDefaults) {
 class EventStore {
   constructor(appDefaults = {}) {
     this.appDefaults = appDefaults;
-    this.state = loadEventStore();
+    try {
+      this.state = loadEventStore();
+    } catch (e) {
+      console.error('[EventStore] 初始化失败，使用空状态:', e);
+      this.state = emptyEventStoreState();
+    }
     this.listeners = new Set();
   }
 
@@ -644,7 +775,8 @@ class EventStore {
 
     this.state = emptyEventStoreState();
     this.state.deviceId = deviceId;
-    return this.appendEvents(events, null);
+    this.appendEvents(events, null);
+    return events.length;
   }
 
   exportForMerge(options = {}) {

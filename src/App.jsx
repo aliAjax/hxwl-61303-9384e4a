@@ -11,30 +11,6 @@ import {
   EVENT_STORE_VERSION
 } from './eventStore.js';
 
-const appDefaults = {
-  reminderSettings: DEFAULT_REMINDER_SETTINGS,
-  riskRules: DEFAULT_RISK_RULES,
-  autoPlanConfig: DEFAULT_AUTO_PLAN_CONFIG
-};
-
-let globalEventStore = null;
-function getEventStore() {
-  if (!globalEventStore) {
-    globalEventStore = new EventStore(appDefaults);
-  }
-  return globalEventStore;
-}
-
-function getCurrentFullState(currentRecords, currentReminderSettings, currentRoutePlans, currentRiskRules, currentAutoPlanConfig) {
-  return {
-    records: JSON.parse(JSON.stringify(currentRecords)),
-    routePlans: JSON.parse(JSON.stringify(currentRoutePlans)),
-    reminderSettings: JSON.parse(JSON.stringify(currentReminderSettings)),
-    riskRules: JSON.parse(JSON.stringify(currentRiskRules || {})),
-    autoPlanConfig: JSON.parse(JSON.stringify(currentAutoPlanConfig || {}))
-  };
-}
-
 const appConfig = {
   "id": "hxwl-61303",
   "port": 61303,
@@ -250,6 +226,30 @@ const DEFAULT_AUTO_PLAN_CONFIG = {
   allowAdvanceScheduling: false,
   maxAdvanceDays: 0
 };
+
+const appDefaults = {
+  reminderSettings: DEFAULT_REMINDER_SETTINGS,
+  riskRules: DEFAULT_RISK_RULES,
+  autoPlanConfig: DEFAULT_AUTO_PLAN_CONFIG
+};
+
+let globalEventStore = null;
+function getEventStore() {
+  if (!globalEventStore) {
+    globalEventStore = new EventStore(appDefaults);
+  }
+  return globalEventStore;
+}
+
+function getCurrentFullState(currentRecords, currentReminderSettings, currentRoutePlans, currentRiskRules, currentAutoPlanConfig) {
+  return {
+    records: JSON.parse(JSON.stringify(currentRecords)),
+    routePlans: JSON.parse(JSON.stringify(currentRoutePlans)),
+    reminderSettings: JSON.parse(JSON.stringify(currentReminderSettings)),
+    riskRules: JSON.parse(JSON.stringify(currentRiskRules || {})),
+    autoPlanConfig: JSON.parse(JSON.stringify(currentAutoPlanConfig || {}))
+  };
+}
 
 function loadAutoPlanDraft() {
   const raw = localStorage.getItem(AUTO_PLAN_DRAFT_STORAGE_KEY);
