@@ -200,6 +200,9 @@ const DATA_EXPORT_APP_ID = 'hxwl-61303-elevator-maintenance';
 const MERGE_DATA_VERSION = '1.0.0';
 const MERGE_DATA_APP_ID = 'hxwl-61303-elevator-maintenance';
 
+const MERGE_HISTORY_STORAGE_KEY = 'hxwl-61303-merge-history';
+const MERGE_HISTORY_LIMIT = 20;
+
 const AUTO_PLAN_DRAFT_STORAGE_KEY = 'hxwl-61303-auto-plan-draft';
 const AUTO_PLAN_HISTORY_STORAGE_KEY = 'hxwl-61303-auto-plan-history';
 const AUTO_PLAN_CONFIG_STORAGE_KEY = 'hxwl-61303-auto-plan-config';
@@ -343,6 +346,31 @@ function loadRiskRules() {
 
 function saveRiskRules(rules) {
   localStorage.setItem(RISK_RULES_STORAGE_KEY, JSON.stringify(rules));
+}
+
+function loadMergeHistory() {
+  const raw = localStorage.getItem(MERGE_HISTORY_STORAGE_KEY);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function saveMergeHistory(history) {
+  localStorage.setItem(MERGE_HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, MERGE_HISTORY_LIMIT)));
+}
+
+function createDataSnapshot(currentRecords, currentReminderSettings, currentRoutePlans) {
+  return {
+    records: JSON.parse(JSON.stringify(currentRecords)),
+    reminderSettings: JSON.parse(JSON.stringify(currentReminderSettings)),
+    routePlans: JSON.parse(JSON.stringify(currentRoutePlans)),
+    createdAt: new Date().toISOString()
+  };
 }
 
 function getReminderStatus(item, reminderSettings) {
@@ -1175,6 +1203,9 @@ function App() {
   const [ownerInputValue, setOwnerInputValue] = useState('');
   const [calendarFilters, setCalendarFilters] = useState({ owner: '全部', cycle: '全部' });
   const [showPrintExportModal, setShowPrintExportModal] = useState(false);
+  const [mergeHistory, setMergeHistory] = useState(loadMergeHistory);
+  const [showRollbackConfirm, setShowRollbackConfirm] = useState(false);
+  const [rollbackTarget, setRollbackTarget] = useState(null);
 
   const estateMetadata = useMemo(() => {
     const meta = {};
@@ -1987,6 +2018,8 @@ function App() {
   function handleExecuteMerge() {
     if (!mergeValidation?.data) return;
     
+    const snapshot = createDataSnapshot(records, reminderSettings, routePlans);
+    
     const mergedRecords = [];
     const seenKeys = new Set();
     
@@ -2036,15 +2069,17 @@ function App() {
     persist(finalRecords);
 
     const { reminderSettings: importReminderSettings, routePlans: importRoutePlans, riskRules: importRiskRules } = mergeValidation.data;
+    let finalReminderSettings = reminderSettings;
+    let finalRoutePlans = routePlans;
     if (importReminderSettings) {
-      const mergedReminder = { ...DEFAULT_REMINDER_SETTINGS, ...reminderSettings, ...importReminderSettings };
-      setReminderSettings(mergedReminder);
-      saveReminderSettings(mergedReminder);
+      finalReminderSettings = { ...DEFAULT_REMINDER_SETTINGS, ...reminderSettings, ...importReminderSettings };
+      setReminderSettings(finalReminderSettings);
+      saveReminderSettings(finalReminderSettings);
     }
     if (importRoutePlans) {
-      const mergedRoutes = { ...routePlans, ...importRoutePlans };
-      setRoutePlans(mergedRoutes);
-      saveRoutePlans(mergedRoutes);
+      finalRoutePlans = { ...routePlans, ...importRoutePlans };
+      setRoutePlans(finalRoutePlans);
+      saveRoutePlans(finalRoutePlans);
     }
     if (importRiskRules) {
       const mergedRiskRules = { ...DEFAULT_RISK_RULES, ...riskRules, ...importRiskRules };
@@ -2052,8 +2087,25 @@ function App() {
       saveRiskRules(mergedRiskRules);
     }
 
+    const mergeHistoryEntry = {
+      id: 'merge_' + Math.random().toString(36).slice(2, 12),
+      type: 'merge',
+      timestamp: new Date().toISOString(),
+      deviceInfo: deviceInfo || { name: '未知设备', id: '' },
+      snapshot: snapshot,
+      summary: {
+        beforeRecordCount: records.length,
+        afterRecordCount: finalRecords.length,
+        conflictCount: mergeConflicts.length,
+        importRecordCount: mergeValidation?.summary?.recordCount || 0
+      }
+    };
+    const nextHistory = [mergeHistoryEntry, ...mergeHistory];
+    setMergeHistory(nextHistory);
+    saveMergeHistory(nextHistory);
+
     setSelected(null);
-    alert(`合并完成！共 ${finalRecords.length} 条记录。${importRiskRules ? '风险规则配置已同步更新。' : ''}`);
+    alert(`合并完成！共 ${finalRecords.length} 条记录。${importRiskRules ? '风险规则配置已同步更新。' : ''} 已自动创建合并前快照，可在多端合并区域回滚。`);
     closeDataManager();
   }
 
@@ -2067,6 +2119,56 @@ function App() {
     const safeDeviceName = deviceName.replace(/[^\w\u4e00-\u9fa5]/g, '_');
     const filename = `电梯维保数据_${safeDeviceName}_${dateStr}.json`;
     downloadJSON(exportData, filename);
+  }
+
+  function handleOpenRollbackConfirm(historyEntry) {
+    setRollbackTarget(historyEntry);
+    setShowRollbackConfirm(true);
+  }
+
+  function handleCancelRollback() {
+    setShowRollbackConfirm(false);
+    setRollbackTarget(null);
+  }
+
+  function handleConfirmRollback() {
+    if (!rollbackTarget?.snapshot) return;
+    
+    const { snapshot } = rollbackTarget;
+    const beforeRecordCount = records.length;
+    const beforeReminderCount = Object.keys(reminderSettings).length;
+    const beforeRouteCount = Object.keys(routePlans).length;
+    
+    persist(snapshot.records);
+    setReminderSettings(snapshot.reminderSettings);
+    saveReminderSettings(snapshot.reminderSettings);
+    setRoutePlans(snapshot.routePlans);
+    saveRoutePlans(snapshot.routePlans);
+    
+    const rollbackEntry = {
+      id: 'rollback_' + Math.random().toString(36).slice(2, 12),
+      type: 'rollback',
+      timestamp: new Date().toISOString(),
+      rollbackTargetId: rollbackTarget.id,
+      rollbackTargetTimestamp: rollbackTarget.timestamp,
+      deviceInfo: rollbackTarget.deviceInfo,
+      summary: {
+        beforeRecordCount,
+        afterRecordCount: snapshot.records.length,
+        beforeReminderCount,
+        afterReminderCount: Object.keys(snapshot.reminderSettings).length,
+        beforeRouteCount,
+        afterRouteCount: Object.keys(snapshot.routePlans).length
+      }
+    };
+    const nextHistory = [rollbackEntry, ...mergeHistory];
+    setMergeHistory(nextHistory);
+    saveMergeHistory(nextHistory);
+
+    setSelected(null);
+    setShowRollbackConfirm(false);
+    setRollbackTarget(null);
+    alert(`回滚成功！已恢复到 ${new Date(rollbackTarget.timestamp).toLocaleString('zh-CN')} 的快照状态。`);
   }
 
   function addTemperature(item) {
@@ -4393,6 +4495,84 @@ function App() {
                   </div>
                 )}
 
+                {mergeHistory.length > 0 && (
+                  <div className="merge-history-section">
+                    <div className="dm-section-title">
+                      <RotateCcw size={16} />
+                      合并/回滚历史
+                      <span className="hint" style={{ marginLeft: 8, fontSize: 12, fontWeight: 400 }}>
+                        （最近 {Math.min(mergeHistory.length, MERGE_HISTORY_LIMIT)} 条）
+                      </span>
+                    </div>
+                    <div className="merge-history-list">
+                      {mergeHistory.slice(0, MERGE_HISTORY_LIMIT).map((entry) => (
+                        <div key={entry.id} className={'merge-history-item ' + entry.type}>
+                          <div className="merge-history-icon">
+                            {entry.type === 'merge' ? <RefreshCw size={16} /> : <RotateCcw size={16} />}
+                          </div>
+                          <div className="merge-history-info">
+                            <div className="merge-history-title">
+                              <strong>
+                                {entry.type === 'merge' ? '多端合并' : '合并回滚'}
+                              </strong>
+                              {entry.type === 'merge' && entry.deviceInfo?.name && (
+                                <span className="merge-history-device">
+                                  · 来自 {entry.deviceInfo.name}
+                                </span>
+                              )}
+                              {entry.type === 'rollback' && entry.rollbackTargetTimestamp && (
+                                <span className="merge-history-device">
+                                  · 回滚至 {new Date(entry.rollbackTargetTimestamp).toLocaleString('zh-CN')}
+                                </span>
+                              )}
+                            </div>
+                            <div className="merge-history-time">
+                              <Clock size={12} />
+                              {new Date(entry.timestamp).toLocaleString('zh-CN')}
+                            </div>
+                            <div className="merge-history-summary">
+                              {entry.type === 'merge' ? (
+                                <>
+                                  <span>合并前：{entry.summary?.beforeRecordCount || 0} 条记录</span>
+                                  <span className="merge-history-sep">→</span>
+                                  <span>合并后：{entry.summary?.afterRecordCount || 0} 条记录</span>
+                                  {(entry.summary?.conflictCount || 0) > 0 && (
+                                    <span className="merge-history-conflict">
+                                      · 冲突 {entry.summary.conflictCount} 条
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                <>
+                                  <span>记录：{entry.summary?.beforeRecordCount || 0} → {entry.summary?.afterRecordCount || 0}</span>
+                                  <span className="merge-history-sep">|</span>
+                                  <span>提醒配置：{entry.summary?.beforeReminderCount || 0} → {entry.summary?.afterReminderCount || 0}</span>
+                                  <span className="merge-history-sep">|</span>
+                                  <span>路线方案：{entry.summary?.beforeRouteCount || 0} → {entry.summary?.afterRouteCount || 0}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                          {entry.type === 'merge' && entry.snapshot && (
+                            <button
+                              type="button"
+                              className="rollback-btn"
+                              onClick={() => handleOpenRollbackConfirm(entry)}
+                              title="回滚到此合并之前的状态"
+                            >
+                              <RotateCcw size={14} />
+                              回滚
+                            </button>
+                          )}
+                          {entry.type === 'rollback' && (
+                            <span className="rollback-badge">已回滚</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="modal-actions">
                   <button type="button" className="secondary-btn" onClick={closeDataManager}>取消</button>
                   <button
@@ -4715,6 +4895,116 @@ function App() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {showRollbackConfirm && rollbackTarget && (
+        <div className="modal-overlay" onClick={handleCancelRollback}>
+          <div className="modal-panel rollback-confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <RotateCcw size={18} />
+                <h2>确认回滚</h2>
+              </div>
+              <button className="modal-close" onClick={handleCancelRollback}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="rollback-confirm-content">
+              <div className="rollback-warn-box">
+                <AlertOctagon size={40} />
+                <div>
+                  <h3>此操作将回滚所有本地数据</h3>
+                  <p>回滚操作将恢复到合并之前的状态，包括维保记录、提醒配置和路线方案。当前未保存的数据将丢失。</p>
+                </div>
+              </div>
+
+              <div className="rollback-info-section">
+                <div className="dm-section-title">
+                  <Clock size={16} />
+                  回滚目标信息
+                </div>
+                <div className="rollback-info-grid">
+                  <div className="rollback-info-item">
+                    <span className="rollback-info-label">操作类型</span>
+                    <strong className="rollback-info-value">
+                      {rollbackTarget.type === 'merge' ? '多端合并' : '合并回滚'}
+                    </strong>
+                  </div>
+                  <div className="rollback-info-item">
+                    <span className="rollback-info-label">执行时间</span>
+                    <strong className="rollback-info-value">
+                      {new Date(rollbackTarget.timestamp).toLocaleString('zh-CN')}
+                    </strong>
+                  </div>
+                  {rollbackTarget.deviceInfo?.name && (
+                    <div className="rollback-info-item">
+                      <span className="rollback-info-label">来源设备</span>
+                      <strong className="rollback-info-value">{rollbackTarget.deviceInfo.name}</strong>
+                    </div>
+                  )}
+                  <div className="rollback-info-item">
+                    <span className="rollback-info-label">快照记录数</span>
+                    <strong className="rollback-info-value">
+                      {rollbackTarget.snapshot?.records?.length || 0} 条
+                    </strong>
+                  </div>
+                  <div className="rollback-info-item">
+                    <span className="rollback-info-label">提醒配置</span>
+                    <strong className="rollback-info-value">
+                      {Object.keys(rollbackTarget.snapshot?.reminderSettings || {}).length} 项
+                    </strong>
+                  </div>
+                  <div className="rollback-info-item">
+                    <span className="rollback-info-label">路线方案</span>
+                    <strong className="rollback-info-value">
+                      {Object.keys(rollbackTarget.snapshot?.routePlans || {}).length} 天
+                    </strong>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rollback-preview-section">
+                <div className="dm-section-title">
+                  <Database size={16} />
+                  数据变化预览
+                </div>
+                <div className="rollback-preview-list">
+                  <div className="rollback-preview-item">
+                    <span>维保记录</span>
+                    <span className="rollback-preview-arrow">
+                      {records.length} → {rollbackTarget.snapshot?.records?.length || 0}
+                    </span>
+                  </div>
+                  <div className="rollback-preview-item">
+                    <span>提醒配置</span>
+                    <span className="rollback-preview-arrow">
+                      {Object.keys(reminderSettings).length} → {Object.keys(rollbackTarget.snapshot?.reminderSettings || {}).length}
+                    </span>
+                  </div>
+                  <div className="rollback-preview-item">
+                    <span>路线方案</span>
+                    <span className="rollback-preview-arrow">
+                      {Object.keys(routePlans).length} → {Object.keys(rollbackTarget.snapshot?.routePlans || {}).length}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-btn" onClick={handleCancelRollback}>取消</button>
+              <button
+                type="button"
+                className="primary danger"
+                onClick={handleConfirmRollback}
+              >
+                <RotateCcw size={16} />
+                确认回滚
+              </button>
+            </div>
           </div>
         </div>
       )}
