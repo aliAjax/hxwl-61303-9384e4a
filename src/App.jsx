@@ -420,7 +420,8 @@ function normalizeTimelineEntry(entry, defaultStatus) {
     at: entry.at || today,
     by: entry.by || '系统',
     ...(entry.notes ? { notes: entry.notes } : {}),
-    ...(entry.backfill ? { backfill: entry.backfill } : {})
+    ...(entry.backfill ? { backfill: entry.backfill } : {}),
+    ...(entry.nextCycle ? { nextCycle: entry.nextCycle } : {})
   };
 }
 
@@ -622,7 +623,9 @@ function getTimelineEntryKey(entry) {
   const at = entry.at || '';
   const by = entry.by || '';
   const notes = entry.notes || '';
-  return `${status}-${at}-${by}-${notes}`;
+  const backfill = entry.backfill ? JSON.stringify(entry.backfill) : '';
+  const nextCycle = entry.nextCycle ? JSON.stringify(entry.nextCycle) : '';
+  return `${status}-${at}-${by}-${notes}-${backfill}-${nextCycle}`;
 }
 
 function detectTimelineConflict(localTimeline, importTimeline) {
@@ -1387,9 +1390,9 @@ function App() {
     setShowBackfillModal(true);
   }
 
-  function handleBackfillSubmit() {
+  function handleBackfillSubmit(withNextCycle = false) {
     if (!backfillItem) return;
-    const timelineEntry = {
+    const completedTimelineEntry = {
       status: '已完成',
       at: backfillForm.completedAt || today,
       by: backfillForm.executor || '操作员',
@@ -1400,11 +1403,31 @@ function App() {
         nextDate: backfillForm.nextDate || ''
       }
     };
+
+    const newTimelines = [...(backfillItem.timeline || []), completedTimelineEntry];
+    let finalStatus = '已完成';
+    let finalNextDate = backfillForm.nextDate || backfillItem.nextDate;
+
+    if (withNextCycle) {
+      finalStatus = '待维保';
+      finalNextDate = backfillForm.nextDate || backfillItem.nextDate;
+      const nextCycleTimelineEntry = {
+        status: '待维保',
+        at: backfillForm.completedAt || today,
+        by: backfillForm.executor || '操作员',
+        nextCycle: {
+          cycleStart: true,
+          nextDate: backfillForm.nextDate || ''
+        }
+      };
+      newTimelines.push(nextCycleTimelineEntry);
+    }
+
     const next = records.map((item) => item.id === backfillItem.id ? {
       ...item,
-      status: '已完成',
-      nextDate: backfillForm.nextDate || item.nextDate,
-      timeline: [...(item.timeline || []), timelineEntry]
+      status: finalStatus,
+      nextDate: finalNextDate,
+      timeline: newTimelines
     } : item);
     persist(next);
     if (selected?.id === backfillItem.id) setSelected(next.find((item) => item.id === backfillItem.id));
@@ -3748,11 +3771,15 @@ function App() {
                 </p>
               )}
             </div>
-            <div className="modal-actions">
+            <div className="modal-actions backfill-actions">
               <button type="button" className="secondary-btn" onClick={() => { setShowBackfillModal(false); setBackfillItem(null); }}>取消</button>
-              <button type="button" className="primary" onClick={handleBackfillSubmit}>
+              <button type="button" className="secondary-btn backfill-finish-only" onClick={() => handleBackfillSubmit(false)}>
                 <CheckCircle2 size={16} />
-                确认完成
+                仅完成
+              </button>
+              <button type="button" className="primary backfill-next-cycle" onClick={() => handleBackfillSubmit(true)}>
+                <RefreshCw size={16} />
+                完成并进入下一周期
               </button>
             </div>
           </div>
@@ -6956,17 +6983,26 @@ function App() {
                   )}
                   <div className="timeline">
                     {(selected.timeline || []).map((step, index) => (
-                      <div key={index} className={'timeline-entry ' + (step.backfill ? 'timeline-backfill' : '')}>
+                      <div key={index} className={'timeline-entry ' + (step.backfill ? 'timeline-backfill' : '') + (step.nextCycle ? ' timeline-next-cycle' : '')}>
                         <div className="timeline-main">
-                          <span className="timeline-status">{step.status}</span>
+                          <span className="timeline-status">
+                            {step.nextCycle ? '进入下一周期' : step.status}
+                          </span>
                           <span className="timeline-at">{step.at}</span>
                           <span className="timeline-by">{step.by}</span>
                         </div>
                         {step.backfill && (
                           <div className="timeline-backfill-detail">
+                            <span className="backfill-field backfill-type-label"><strong>本次完成</strong></span>
                             {step.backfill.executor && <span className="backfill-field"><strong>执行人：</strong>{step.backfill.executor}</span>}
                             {step.backfill.notes && <span className="backfill-field"><strong>现场备注：</strong>{step.backfill.notes}</span>}
                             {step.backfill.nextDate && <span className="backfill-field"><strong>下次维保：</strong>{step.backfill.nextDate}</span>}
+                          </div>
+                        )}
+                        {step.nextCycle && (
+                          <div className="timeline-next-cycle-detail">
+                            <span className="backfill-field next-cycle-type-label"><strong>下一周期创建</strong></span>
+                            {step.nextCycle.nextDate && <span className="backfill-field"><strong>下次维保日期：</strong>{step.nextCycle.nextDate}</span>}
                           </div>
                         )}
                       </div>

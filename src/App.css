@@ -313,6 +313,10 @@ textarea { min-height: 76px; resize: vertical; }
   border-left-color: #10b981;
   background: #f0fdf4;
 }
+.timeline-entry.timeline-next-cycle {
+  border-left-color: #2563eb;
+  background: #eff6ff;
+}
 .timeline-main {
   display: flex;
   align-items: center;
@@ -337,6 +341,23 @@ textarea { min-height: 76px; resize: vertical; }
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid #d1fae5;
+}
+.timeline-next-cycle-detail {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #bfdbfe;
+}
+.backfill-type-label, .next-cycle-type-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+.backfill-type-label {
+  color: #059669;
+}
+.next-cycle-type-label {
+  color: #2563eb;
 }
 .backfill-field {
   font-size: 13px;
@@ -2070,9 +2091,38 @@ textarea { min-height: 76px; resize: vertical; }
   line-height: 1.5;
 }
 
+.backfill-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.backfill-actions .backfill-finish-only {
+  border-color: #10b981;
+  color: #059669;
+  background: #f0fdf4;
+}
+
+.backfill-actions .backfill-finish-only:hover {
+  background: #d1fae5;
+  border-color: #059669;
+}
+
+.backfill-actions .backfill-next-cycle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 @media (max-width: 620px) {
   .backfill-form {
     grid-template-columns: 1fr;
+  }
+  .backfill-actions {
+    flex-direction: column;
+  }
+  .backfill-actions button {
+    width: 100%;
   }
 }
 
