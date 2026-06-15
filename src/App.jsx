@@ -178,6 +178,22 @@ const DEFAULT_REMINDER_SETTINGS = {
   '30天': 7
 };
 
+const RISK_RULES_STORAGE_KEY = 'hxwl-61303-risk-rules';
+const DEFAULT_RISK_RULES = {
+  overdueEnabled: true,
+  overdueLabel: '逾期未维保',
+  soonExpireDays: 3,
+  soonExpireEnabled: true,
+  soonExpireLabel: '即将到期',
+  overloadThreshold: 5,
+  overloadEnabled: true,
+  overloadLabel: '任务过载',
+  estateConcentrationThreshold: 3,
+  estateConcentrationWindow: 7,
+  estateConcentrationEnabled: true,
+  estateConcentrationLabel: '集中到期'
+};
+
 const ROUTE_PLANS_STORAGE_KEY = 'hxwl-61303-route-plans';
 const DATA_EXPORT_VERSION = '1.1.0';
 const DATA_EXPORT_APP_ID = 'hxwl-61303-elevator-maintenance';
@@ -310,6 +326,23 @@ function loadReminderSettings() {
 
 function saveReminderSettings(settings) {
   localStorage.setItem(REMINDER_STORAGE_KEY, JSON.stringify(settings));
+}
+
+function loadRiskRules() {
+  const raw = localStorage.getItem(RISK_RULES_STORAGE_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      return { ...DEFAULT_RISK_RULES, ...parsed };
+    } catch {
+      return { ...DEFAULT_RISK_RULES };
+    }
+  }
+  return { ...DEFAULT_RISK_RULES };
+}
+
+function saveRiskRules(rules) {
+  localStorage.setItem(RISK_RULES_STORAGE_KEY, JSON.stringify(rules));
 }
 
 function getReminderStatus(item, reminderSettings) {
@@ -809,7 +842,7 @@ function validateMergeData(parsed) {
   };
 }
 
-function buildExportData(records, reminderSettings, routePlans) {
+function buildExportData(records, reminderSettings, routePlans, riskRules) {
   return {
     appId: DATA_EXPORT_APP_ID,
     version: DATA_EXPORT_VERSION,
@@ -817,7 +850,8 @@ function buildExportData(records, reminderSettings, routePlans) {
     data: {
       records,
       reminderSettings,
-      routePlans
+      routePlans,
+      riskRules
     }
   };
 }
@@ -860,6 +894,10 @@ function validateImportData(parsed) {
 
   if (!data.routePlans || typeof data.routePlans !== 'object') {
     errors.push('字段缺失：routePlans 应为对象');
+  }
+
+  if (!data.riskRules || typeof data.riskRules !== 'object') {
+    warnings.push('导入文件中缺少风险规则配置，将使用系统默认值');
   }
 
   if (errors.length > 0) {
@@ -1081,8 +1119,11 @@ function App() {
   const [selectedOwner, setSelectedOwner] = useState(null);
   const [workbenchView, setWorkbenchView] = useState(false);
   const [reminderSettings, setReminderSettings] = useState(loadReminderSettings);
+  const [riskRules, setRiskRules] = useState(loadRiskRules);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState('reminder');
   const [tempSettings, setTempSettings] = useState(loadReminderSettings);
+  const [tempRiskRules, setTempRiskRules] = useState(loadRiskRules);
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const editFormRef = useRef(null);
@@ -1676,28 +1717,51 @@ function App() {
     setEditForm({});
   }
 
-  function openSettings() {
+  function openSettings(tab = 'reminder') {
     setTempSettings({ ...reminderSettings });
+    setTempRiskRules({ ...riskRules });
+    setSettingsTab(tab);
     setShowSettings(true);
   }
 
   function handleSaveSettings() {
-    const sanitized = {};
-    Object.keys(tempSettings).forEach((key) => {
-      const val = parseInt(tempSettings[key], 10);
-      sanitized[key] = Number.isFinite(val) && val >= 0 ? val : DEFAULT_REMINDER_SETTINGS[key];
-    });
-    setReminderSettings(sanitized);
-    saveReminderSettings(sanitized);
+    if (settingsTab === 'reminder') {
+      const sanitized = {};
+      Object.keys(tempSettings).forEach((key) => {
+        const val = parseInt(tempSettings[key], 10);
+        sanitized[key] = Number.isFinite(val) && val >= 0 ? val : DEFAULT_REMINDER_SETTINGS[key];
+      });
+      setReminderSettings(sanitized);
+      saveReminderSettings(sanitized);
+    } else if (settingsTab === 'risk') {
+      const sanitized = {};
+      Object.keys(tempRiskRules).forEach((key) => {
+        const val = tempRiskRules[key];
+        if (key.includes('Threshold') || key.includes('Window') || key.includes('Days')) {
+          const numVal = parseInt(val, 10);
+          sanitized[key] = Number.isFinite(numVal) && numVal >= 0 ? numVal : DEFAULT_RISK_RULES[key];
+        } else if (key.includes('Enabled')) {
+          sanitized[key] = Boolean(val);
+        } else {
+          sanitized[key] = String(val || DEFAULT_RISK_RULES[key]);
+        }
+      });
+      setRiskRules(sanitized);
+      saveRiskRules(sanitized);
+    }
     setShowSettings(false);
   }
 
   function handleResetSettings() {
-    setTempSettings({ ...DEFAULT_REMINDER_SETTINGS });
+    if (settingsTab === 'reminder') {
+      setTempSettings({ ...DEFAULT_REMINDER_SETTINGS });
+    } else if (settingsTab === 'risk') {
+      setTempRiskRules({ ...DEFAULT_RISK_RULES });
+    }
   }
 
   function handleExportData() {
-    const exportData = buildExportData(records, reminderSettings, routePlans);
+    const exportData = buildExportData(records, reminderSettings, routePlans, riskRules);
     const dateStr = formatDate(new Date());
     const filename = `电梯维保数据_${dateStr}.json`;
     downloadJSON(exportData, filename);
@@ -1759,13 +1823,18 @@ function App() {
 
   function handleConfirmRestore() {
     if (!importValidation?.valid || !importValidation.data) return;
-    const { records: newRecords, reminderSettings: newReminderSettings, routePlans: newRoutePlans } = importValidation.data;
+    const { records: newRecords, reminderSettings: newReminderSettings, routePlans: newRoutePlans, riskRules: newRiskRules } = importValidation.data;
 
     persist(newRecords);
     setReminderSettings(newReminderSettings);
     saveReminderSettings(newReminderSettings);
     setRoutePlans(newRoutePlans);
     saveRoutePlans(newRoutePlans);
+    if (newRiskRules) {
+      const mergedRiskRules = { ...DEFAULT_RISK_RULES, ...newRiskRules };
+      setRiskRules(mergedRiskRules);
+      saveRiskRules(mergedRiskRules);
+    }
 
     setSelected(null);
     alert('数据恢复成功！');
@@ -1965,8 +2034,26 @@ function App() {
     const finalRecords = migrateRecords(mergedRecords);
     
     persist(finalRecords);
+
+    const { reminderSettings: importReminderSettings, routePlans: importRoutePlans, riskRules: importRiskRules } = mergeValidation.data;
+    if (importReminderSettings) {
+      const mergedReminder = { ...DEFAULT_REMINDER_SETTINGS, ...reminderSettings, ...importReminderSettings };
+      setReminderSettings(mergedReminder);
+      saveReminderSettings(mergedReminder);
+    }
+    if (importRoutePlans) {
+      const mergedRoutes = { ...routePlans, ...importRoutePlans };
+      setRoutePlans(mergedRoutes);
+      saveRoutePlans(mergedRoutes);
+    }
+    if (importRiskRules) {
+      const mergedRiskRules = { ...DEFAULT_RISK_RULES, ...riskRules, ...importRiskRules };
+      setRiskRules(mergedRiskRules);
+      saveRiskRules(mergedRiskRules);
+    }
+
     setSelected(null);
-    alert(`合并完成！共 ${finalRecords.length} 条记录。`);
+    alert(`合并完成！共 ${finalRecords.length} 条记录。${importRiskRules ? '风险规则配置已同步更新。' : ''}`);
     closeDataManager();
   }
 
@@ -2649,24 +2736,42 @@ function App() {
     return records.filter((item) => (item.owner || '未分配') === selectedOwner);
   }, [records, selectedOwner]);
 
-  const OVERLOAD_THRESHOLD = 5;
-  const ESTATE_CONCENTRATION_THRESHOLD = 3;
-  const ESTATE_CONCENTRATION_WINDOW = 7;
-
   const riskItems = useMemo(() => {
     const risks = [];
+    const { 
+      overdueEnabled, 
+      soonExpireDays, 
+      soonExpireEnabled, 
+      overloadThreshold, 
+      overloadEnabled, 
+      estateConcentrationThreshold, 
+      estateConcentrationWindow, 
+      estateConcentrationEnabled,
+      overdueLabel,
+      soonExpireLabel,
+      overloadLabel,
+      estateConcentrationLabel
+    } = riskRules;
 
-    const overdueItems = records.filter((item) => item.nextDate && item.nextDate < today && item.status !== '已完成');
-    if (overdueItems.length > 0) {
-      risks.push({
-        key: 'overdue',
-        type: 'critical',
-        icon: AlertOctagon,
-        label: '逾期未维保',
-        summary: `${overdueItems.length} 台电梯已超过维保日期未完成`,
-        items: overdueItems.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
-        expanded: expandedRisks['overdue'] !== false
-      });
+    if (overdueEnabled) {
+      const overdueItems = records.filter((item) => item.nextDate && item.nextDate < today && item.status !== '已完成');
+      if (overdueItems.length > 0) {
+        risks.push({
+          key: 'overdue',
+          type: 'critical',
+          icon: AlertOctagon,
+          label: overdueLabel,
+          summary: `${overdueItems.length} 台电梯已超过维保日期未完成`,
+          items: overdueItems.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
+          expanded: expandedRisks['overdue'] !== false,
+          triggeredRule: {
+            type: 'overdue',
+            description: '维保日期已过且未完成',
+            threshold: null,
+            actual: overdueItems.length
+          }
+        });
+      }
     }
 
     const todayDueItems = records.filter((item) => item.nextDate === today && item.status !== '已完成');
@@ -2678,81 +2783,112 @@ function App() {
         label: '今日到期',
         summary: `${todayDueItems.length} 台电梯今日需维保`,
         items: todayDueItems,
-        expanded: expandedRisks['today'] !== false
+        expanded: expandedRisks['today'] !== false,
+        triggeredRule: {
+          type: 'today',
+          description: '维保日期为今日',
+          threshold: null,
+          actual: todayDueItems.length
+        }
       });
     }
 
-    const soonDueItems = records.filter((item) => {
-      if (!item.nextDate || item.status === '已完成') return false;
-      const diff = daysBetween(item.nextDate, today);
-      return diff > 0 && diff <= 3;
-    });
-    if (soonDueItems.length > 0) {
-      risks.push({
-        key: 'soon3',
-        type: 'info',
-        icon: Bell,
-        label: '3天内到期',
-        summary: `${soonDueItems.length} 台电梯将在3天内到期`,
-        items: soonDueItems.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
-        expanded: expandedRisks['soon3'] !== false
+    if (soonExpireEnabled && soonExpireDays > 0) {
+      const soonDueItems = records.filter((item) => {
+        if (!item.nextDate || item.status === '已完成') return false;
+        const diff = daysBetween(item.nextDate, today);
+        return diff > 0 && diff <= soonExpireDays;
       });
-    }
-
-    const ownerTaskMap = {};
-    records.forEach((item) => {
-      if (item.status === '已完成') return;
-      const owner = item.owner || '未分配';
-      if (!ownerTaskMap[owner]) ownerTaskMap[owner] = [];
-      ownerTaskMap[owner].push(item);
-    });
-    Object.entries(ownerTaskMap).forEach(([owner, items]) => {
-      if (items.length >= OVERLOAD_THRESHOLD) {
-        const overdueCount = items.filter((it) => it.nextDate < today).length;
+      if (soonDueItems.length > 0) {
         risks.push({
-          key: `overload_${owner}`,
-          type: 'warning',
-          icon: UserX,
-          label: `${owner} 任务过载`,
-          summary: `${owner} 待处理 ${items.length} 台（逾期 ${overdueCount} 台），超出负荷阈值（${OVERLOAD_THRESHOLD}）`,
-          items: items.sort((a, b) => {
-            if (a.nextDate < today && b.nextDate >= today) return -1;
-            if (b.nextDate < today && a.nextDate >= today) return 1;
-            return a.nextDate.localeCompare(b.nextDate);
-          }),
-          expanded: expandedRisks[`overload_${owner}`] !== false
-        });
-      }
-    });
-
-    const estateWindowMap = {};
-    records.forEach((item) => {
-      if (!item.nextDate || item.status === '已完成') return;
-      const diff = daysBetween(item.nextDate, today);
-      if (diff >= 0 && diff <= ESTATE_CONCENTRATION_WINDOW) {
-        if (!estateWindowMap[item.estate]) estateWindowMap[item.estate] = [];
-        estateWindowMap[item.estate].push(item);
-      }
-    });
-    Object.entries(estateWindowMap).forEach(([estate, items]) => {
-      if (items.length >= ESTATE_CONCENTRATION_THRESHOLD) {
-        const owners = [...new Set(items.map((it) => it.owner || '未分配'))];
-        risks.push({
-          key: `estate_${estate}`,
+          key: 'soon3',
           type: 'info',
-          icon: Building,
-          label: `${estate} 集中到期`,
-          summary: `${estate} 有 ${items.length} 台电梯在 ${ESTATE_CONCENTRATION_WINDOW} 天内到期，涉及 ${owners.length} 位负责人`,
-          items: items.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
-          expanded: expandedRisks[`estate_${estate}`] !== false
+          icon: Bell,
+          label: `${soonExpireDays}天内${soonExpireLabel}`,
+          summary: `${soonDueItems.length} 台电梯将在${soonExpireDays}天内到期`,
+          items: soonDueItems.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
+          expanded: expandedRisks['soon3'] !== false,
+          triggeredRule: {
+            type: 'soon',
+            description: `${soonExpireDays}天内到期`,
+            threshold: soonExpireDays,
+            actual: soonDueItems.length
+          }
         });
       }
-    });
+    }
+
+    if (overloadEnabled && overloadThreshold > 0) {
+      const ownerTaskMap = {};
+      records.forEach((item) => {
+        if (item.status === '已完成') return;
+        const owner = item.owner || '未分配';
+        if (!ownerTaskMap[owner]) ownerTaskMap[owner] = [];
+        ownerTaskMap[owner].push(item);
+      });
+      Object.entries(ownerTaskMap).forEach(([owner, items]) => {
+        if (items.length >= overloadThreshold) {
+          const overdueCount = items.filter((it) => it.nextDate < today).length;
+          risks.push({
+            key: `overload_${owner}`,
+            type: 'warning',
+            icon: UserX,
+            label: `${owner} ${overloadLabel}`,
+            summary: `${owner} 待处理 ${items.length} 台（逾期 ${overdueCount} 台），超出负荷阈值（${overloadThreshold}）`,
+            items: items.sort((a, b) => {
+              if (a.nextDate < today && b.nextDate >= today) return -1;
+              if (b.nextDate < today && a.nextDate >= today) return 1;
+              return a.nextDate.localeCompare(b.nextDate);
+            }),
+            expanded: expandedRisks[`overload_${owner}`] !== false,
+            triggeredRule: {
+              type: 'overload',
+              description: `负责人待处理任务数 >= ${overloadThreshold}`,
+              threshold: overloadThreshold,
+              actual: items.length
+            }
+          });
+        }
+      });
+    }
+
+    if (estateConcentrationEnabled && estateConcentrationWindow > 0 && estateConcentrationThreshold > 0) {
+      const estateWindowMap = {};
+      records.forEach((item) => {
+        if (!item.nextDate || item.status === '已完成') return;
+        const diff = daysBetween(item.nextDate, today);
+        if (diff >= 0 && diff <= estateConcentrationWindow) {
+          if (!estateWindowMap[item.estate]) estateWindowMap[item.estate] = [];
+          estateWindowMap[item.estate].push(item);
+        }
+      });
+      Object.entries(estateWindowMap).forEach(([estate, items]) => {
+        if (items.length >= estateConcentrationThreshold) {
+          const owners = [...new Set(items.map((it) => it.owner || '未分配'))];
+          risks.push({
+            key: `estate_${estate}`,
+            type: 'info',
+            icon: Building,
+            label: `${estate} ${estateConcentrationLabel}`,
+            summary: `${estate} 有 ${items.length} 台电梯在 ${estateConcentrationWindow} 天内到期，涉及 ${owners.length} 位负责人`,
+            items: items.sort((a, b) => a.nextDate.localeCompare(b.nextDate)),
+            expanded: expandedRisks[`estate_${estate}`] !== false,
+            triggeredRule: {
+              type: 'estate',
+              description: `楼盘${estateConcentrationWindow}天内到期数 >= ${estateConcentrationThreshold}`,
+              threshold: estateConcentrationThreshold,
+              actual: items.length,
+              window: estateConcentrationWindow
+            }
+          });
+        }
+      });
+    }
 
     const typeOrder = { critical: 0, warning: 1, info: 2 };
     risks.sort((a, b) => typeOrder[a.type] - typeOrder[b.type]);
     return risks;
-  }, [records, reminderSettings, expandedRisks]);
+  }, [records, reminderSettings, expandedRisks, riskRules]);
 
   const routeDates = useMemo(() => getNextDays(8), []);
 
@@ -3501,35 +3637,213 @@ function App() {
           <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div className="panel-title">
-                <Bell size={18} />
-                <h2>维保提醒设置</h2>
+                <Settings size={18} />
+                <h2>系统设置</h2>
               </div>
               <button className="modal-close" onClick={() => setShowSettings(false)}>
                 <X size={18} />
               </button>
             </div>
-            <p className="hint">为不同维保周期分别配置提前提醒天数，系统将在到期前自动标记「即将到期」。</p>
-            <div className="settings-form">
-              {Object.entries(DEFAULT_REMINDER_SETTINGS).map(([cycle, _]) => (
-                <label key={cycle} className="setting-item">
-                  <span className="setting-cycle">
-                    <Zap size={14} />
-                    {cycle}周期
-                  </span>
-                  <div className="setting-input-wrap">
-                    <input
-                      type="number"
-                      min="0"
-                      max="365"
-                      value={tempSettings[cycle] ?? ''}
-                      onChange={(e) => setTempSettings({ ...tempSettings, [cycle]: e.target.value })}
-                    />
-                    <span className="setting-unit">天</span>
-                  </div>
-                  <span className="setting-default">（默认：{DEFAULT_REMINDER_SETTINGS[cycle]}天）</span>
-                </label>
-              ))}
+            <div className="dm-tabs">
+              <button
+                className={'dm-tab ' + (settingsTab === 'reminder' ? 'active' : '')}
+                onClick={() => setSettingsTab('reminder')}
+              >
+                <Bell size={16} />
+                维保提醒
+              </button>
+              <button
+                className={'dm-tab ' + (settingsTab === 'risk' ? 'active' : '')}
+                onClick={() => setSettingsTab('risk')}
+              >
+                <ShieldAlert size={16} />
+                风险规则
+              </button>
             </div>
+            {settingsTab === 'reminder' && (
+              <>
+                <p className="hint">为不同维保周期分别配置提前提醒天数，系统将在到期前自动标记「即将到期」。</p>
+                <div className="settings-form">
+                  {Object.entries(DEFAULT_REMINDER_SETTINGS).map(([cycle, _]) => (
+                    <label key={cycle} className="setting-item">
+                      <span className="setting-cycle">
+                        <Zap size={14} />
+                        {cycle}周期
+                      </span>
+                      <div className="setting-input-wrap">
+                        <input
+                          type="number"
+                          min="0"
+                          max="365"
+                          value={tempSettings[cycle] ?? ''}
+                          onChange={(e) => setTempSettings({ ...tempSettings, [cycle]: e.target.value })}
+                        />
+                        <span className="setting-unit">天</span>
+                      </div>
+                      <span className="setting-default">（默认：{DEFAULT_REMINDER_SETTINGS[cycle]}天）</span>
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
+            {settingsTab === 'risk' && (
+              <>
+                <p className="hint">配置风险分级看板的触发规则，修改后将立即重新计算风险列表和顶部统计。</p>
+                <div className="settings-form">
+                  <div className="setting-section">
+                    <h4 className="setting-section-title"><AlertOctagon size={14} /> 逾期规则</h4>
+                    <label className="setting-item">
+                      <span className="setting-label">启用规则</span>
+                      <div className="setting-toggle">
+                        <input
+                          type="checkbox"
+                          checked={tempRiskRules.overdueEnabled}
+                          onChange={(e) => setTempRiskRules({ ...tempRiskRules, overdueEnabled: e.target.checked })}
+                        />
+                        <span className="toggle-switch"></span>
+                      </div>
+                    </label>
+                    <label className="setting-item">
+                      <span className="setting-label">规则名称</span>
+                      <input
+                        type="text"
+                        value={tempRiskRules.overdueLabel}
+                        onChange={(e) => setTempRiskRules({ ...tempRiskRules, overdueLabel: e.target.value })}
+                      />
+                      <span className="setting-default">（默认：{DEFAULT_RISK_RULES.overdueLabel}）</span>
+                    </label>
+                  </div>
+
+                  <div className="setting-section">
+                    <h4 className="setting-section-title"><Bell size={14} /> 即将到期规则</h4>
+                    <label className="setting-item">
+                      <span className="setting-label">启用规则</span>
+                      <div className="setting-toggle">
+                        <input
+                          type="checkbox"
+                          checked={tempRiskRules.soonExpireEnabled}
+                          onChange={(e) => setTempRiskRules({ ...tempRiskRules, soonExpireEnabled: e.target.checked })}
+                        />
+                        <span className="toggle-switch"></span>
+                      </div>
+                    </label>
+                    <label className="setting-item">
+                      <span className="setting-label">到期天数阈值</span>
+                      <div className="setting-input-wrap">
+                        <input
+                          type="number"
+                          min="0"
+                          max="365"
+                          value={tempRiskRules.soonExpireDays}
+                          onChange={(e) => setTempRiskRules({ ...tempRiskRules, soonExpireDays: e.target.value })}
+                        />
+                        <span className="setting-unit">天</span>
+                      </div>
+                      <span className="setting-default">（默认：{DEFAULT_RISK_RULES.soonExpireDays}天）</span>
+                    </label>
+                    <label className="setting-item">
+                      <span className="setting-label">规则名称</span>
+                      <input
+                        type="text"
+                        value={tempRiskRules.soonExpireLabel}
+                        onChange={(e) => setTempRiskRules({ ...tempRiskRules, soonExpireLabel: e.target.value })}
+                      />
+                      <span className="setting-default">（默认：{DEFAULT_RISK_RULES.soonExpireLabel}）</span>
+                    </label>
+                  </div>
+
+                  <div className="setting-section">
+                    <h4 className="setting-section-title"><UserX size={14} /> 负责人过载规则</h4>
+                    <label className="setting-item">
+                      <span className="setting-label">启用规则</span>
+                      <div className="setting-toggle">
+                        <input
+                          type="checkbox"
+                          checked={tempRiskRules.overloadEnabled}
+                          onChange={(e) => setTempRiskRules({ ...tempRiskRules, overloadEnabled: e.target.checked })}
+                        />
+                        <span className="toggle-switch"></span>
+                      </div>
+                    </label>
+                    <label className="setting-item">
+                      <span className="setting-label">任务数量阈值</span>
+                      <div className="setting-input-wrap">
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={tempRiskRules.overloadThreshold}
+                          onChange={(e) => setTempRiskRules({ ...tempRiskRules, overloadThreshold: e.target.value })}
+                        />
+                        <span className="setting-unit">台</span>
+                      </div>
+                      <span className="setting-default">（默认：{DEFAULT_RISK_RULES.overloadThreshold}台）</span>
+                    </label>
+                    <label className="setting-item">
+                      <span className="setting-label">规则名称</span>
+                      <input
+                        type="text"
+                        value={tempRiskRules.overloadLabel}
+                        onChange={(e) => setTempRiskRules({ ...tempRiskRules, overloadLabel: e.target.value })}
+                      />
+                      <span className="setting-default">（默认：{DEFAULT_RISK_RULES.overloadLabel}）</span>
+                    </label>
+                  </div>
+
+                  <div className="setting-section">
+                    <h4 className="setting-section-title"><Building size={14} /> 楼盘集中到期规则</h4>
+                    <label className="setting-item">
+                      <span className="setting-label">启用规则</span>
+                      <div className="setting-toggle">
+                        <input
+                          type="checkbox"
+                          checked={tempRiskRules.estateConcentrationEnabled}
+                          onChange={(e) => setTempRiskRules({ ...tempRiskRules, estateConcentrationEnabled: e.target.checked })}
+                        />
+                        <span className="toggle-switch"></span>
+                      </div>
+                    </label>
+                    <label className="setting-item">
+                      <span className="setting-label">到期数量阈值</span>
+                      <div className="setting-input-wrap">
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={tempRiskRules.estateConcentrationThreshold}
+                          onChange={(e) => setTempRiskRules({ ...tempRiskRules, estateConcentrationThreshold: e.target.value })}
+                        />
+                        <span className="setting-unit">台</span>
+                      </div>
+                      <span className="setting-default">（默认：{DEFAULT_RISK_RULES.estateConcentrationThreshold}台）</span>
+                    </label>
+                    <label className="setting-item">
+                      <span className="setting-label">时间窗口</span>
+                      <div className="setting-input-wrap">
+                        <input
+                          type="number"
+                          min="0"
+                          max="365"
+                          value={tempRiskRules.estateConcentrationWindow}
+                          onChange={(e) => setTempRiskRules({ ...tempRiskRules, estateConcentrationWindow: e.target.value })}
+                        />
+                        <span className="setting-unit">天</span>
+                      </div>
+                      <span className="setting-default">（默认：{DEFAULT_RISK_RULES.estateConcentrationWindow}天）</span>
+                    </label>
+                    <label className="setting-item">
+                      <span className="setting-label">规则名称</span>
+                      <input
+                        type="text"
+                        value={tempRiskRules.estateConcentrationLabel}
+                        onChange={(e) => setTempRiskRules({ ...tempRiskRules, estateConcentrationLabel: e.target.value })}
+                      />
+                      <span className="setting-default">（默认：{DEFAULT_RISK_RULES.estateConcentrationLabel}）</span>
+                    </label>
+                  </div>
+                </div>
+              </>
+            )}
             <div className="modal-actions">
               <button type="button" className="secondary-btn" onClick={handleResetSettings}>恢复默认</button>
               <button type="button" className="primary" onClick={handleSaveSettings}>保存设置</button>
@@ -5144,14 +5458,25 @@ function App() {
         </section>
       ) : riskDashboardView ? (
         <section className="risk-dashboard">
-          <div className="risk-summary-bar">
-            <div className="risk-summary-item risk-critical">
-              <AlertOctagon size={20} />
-              <div className="risk-summary-text">
-                <span className="risk-summary-num">{records.filter((item) => item.nextDate && item.nextDate < today && item.status !== '已完成').length}</span>
-                <span className="risk-summary-label">逾期</span>
-              </div>
+          <div className="risk-dashboard-header">
+            <h2 className="risk-dashboard-title">风险分级看板</h2>
+            <div className="risk-dashboard-actions">
+              <button className="secondary-btn small-btn" onClick={() => openSettings('risk')}>
+                <Settings size={14} />
+                风险规则设置
+              </button>
             </div>
+          </div>
+          <div className="risk-summary-bar">
+            {riskRules.overdueEnabled && (
+              <div className="risk-summary-item risk-critical">
+                <AlertOctagon size={20} />
+                <div className="risk-summary-text">
+                  <span className="risk-summary-num">{records.filter((item) => item.nextDate && item.nextDate < today && item.status !== '已完成').length}</span>
+                  <span className="risk-summary-label">{riskRules.overdueLabel}</span>
+                </div>
+              </div>
+            )}
             <div className="risk-summary-item risk-warning">
               <Clock size={20} />
               <div className="risk-summary-text">
@@ -5159,27 +5484,33 @@ function App() {
                 <span className="risk-summary-label">今日到期</span>
               </div>
             </div>
-            <div className="risk-summary-item risk-soon">
-              <Bell size={20} />
-              <div className="risk-summary-text">
-                <span className="risk-summary-num">{records.filter((item) => { if (!item.nextDate || item.status === '已完成') return false; const d = daysBetween(item.nextDate, today); return d > 0 && d <= 3; }).length}</span>
-                <span className="risk-summary-label">3天内到期</span>
+            {riskRules.soonExpireEnabled && riskRules.soonExpireDays > 0 && (
+              <div className="risk-summary-item risk-soon">
+                <Bell size={20} />
+                <div className="risk-summary-text">
+                  <span className="risk-summary-num">{records.filter((item) => { if (!item.nextDate || item.status === '已完成') return false; const d = daysBetween(item.nextDate, today); return d > 0 && d <= riskRules.soonExpireDays; }).length}</span>
+                  <span className="risk-summary-label">{riskRules.soonExpireDays}天内{riskRules.soonExpireLabel}</span>
+                </div>
               </div>
-            </div>
-            <div className="risk-summary-item risk-overload">
-              <UserX size={20} />
-              <div className="risk-summary-text">
-                <span className="risk-summary-num">{(() => { const m = {}; records.forEach((r) => { if (r.status === '已完成') return; const o = r.owner || '未分配'; m[o] = (m[o] || 0) + 1; }); return Object.values(m).filter((c) => c >= OVERLOAD_THRESHOLD).length; })()}</span>
-                <span className="risk-summary-label">负责人过载</span>
+            )}
+            {riskRules.overloadEnabled && riskRules.overloadThreshold > 0 && (
+              <div className="risk-summary-item risk-overload">
+                <UserX size={20} />
+                <div className="risk-summary-text">
+                  <span className="risk-summary-num">{(() => { const m = {}; records.forEach((r) => { if (r.status === '已完成') return; const o = r.owner || '未分配'; m[o] = (m[o] || 0) + 1; }); return Object.values(m).filter((c) => c >= riskRules.overloadThreshold).length; })()}</span>
+                  <span className="risk-summary-label">负责人{riskRules.overloadLabel}</span>
+                </div>
               </div>
-            </div>
-            <div className="risk-summary-item risk-estate">
-              <Building size={20} />
-              <div className="risk-summary-text">
-                <span className="risk-summary-num">{(() => { const m = {}; records.forEach((r) => { if (!r.nextDate || r.status === '已完成') return; const d = daysBetween(r.nextDate, today); if (d >= 0 && d <= ESTATE_CONCENTRATION_WINDOW) { m[r.estate] = (m[r.estate] || 0) + 1; } }); return Object.values(m).filter((c) => c >= ESTATE_CONCENTRATION_THRESHOLD).length; })()}</span>
-                <span className="risk-summary-label">楼盘集中到期</span>
+            )}
+            {riskRules.estateConcentrationEnabled && riskRules.estateConcentrationWindow > 0 && riskRules.estateConcentrationThreshold > 0 && (
+              <div className="risk-summary-item risk-estate">
+                <Building size={20} />
+                <div className="risk-summary-text">
+                  <span className="risk-summary-num">{(() => { const m = {}; records.forEach((r) => { if (!r.nextDate || r.status === '已完成') return; const d = daysBetween(r.nextDate, today); if (d >= 0 && d <= riskRules.estateConcentrationWindow) { m[r.estate] = (m[r.estate] || 0) + 1; } }); return Object.values(m).filter((c) => c >= riskRules.estateConcentrationThreshold).length; })()}</span>
+                  <span className="risk-summary-label">楼盘{riskRules.estateConcentrationLabel}</span>
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           <div className="risk-list">
@@ -5201,6 +5532,15 @@ function App() {
                         <div>
                           <h3>{risk.label}</h3>
                           <p>{risk.summary}</p>
+                          {risk.triggeredRule && (
+                            <div className="risk-triggered-rule">
+                              <span className="rule-badge">触发规则</span>
+                              <span className="rule-desc">{risk.triggeredRule.description}</span>
+                              {risk.triggeredRule.threshold !== null && (
+                                <span className="rule-threshold">阈值：{risk.triggeredRule.threshold}，实际：{risk.triggeredRule.actual}</span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="risk-card-meta">
