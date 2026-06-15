@@ -2502,7 +2502,8 @@ function App() {
         afterRecordCount: finalRecords.length,
         conflictCount: mergeConflicts.length,
         conflictResolutions: conflictResolutionsDetail,
-        snapshotBefore: snapshot
+        snapshotBefore: snapshot,
+        snapshotAfter: getCurrentFullState(finalRecords, finalReminderSettings, finalRoutePlans, finalRiskRules, autoPlanConfig)
       }
     });
     getEventStore().appendEvent(mergeEvt, getCurrentFullState(finalRecords, finalReminderSettings, finalRoutePlans, finalRiskRules, autoPlanConfig));

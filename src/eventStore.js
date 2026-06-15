@@ -405,22 +405,23 @@ function applyAutoPlanConfirm(state, event) {
 }
 
 function applyMergeExecute(state, event) {
-  const { snapshotBefore } = event.payload;
-  if (!snapshotBefore) return state;
-  if (snapshotBefore.records) {
-    state = { ...state, records: JSON.parse(JSON.stringify(snapshotBefore.records)) };
+  const { snapshotAfter } = event.payload;
+  const snap = snapshotAfter;
+  if (!snap) return state;
+  if (snap.records) {
+    state = { ...state, records: JSON.parse(JSON.stringify(snap.records)) };
   }
-  if (snapshotBefore.routePlans) {
-    state = { ...state, routePlans: JSON.parse(JSON.stringify(snapshotBefore.routePlans)) };
+  if (snap.routePlans) {
+    state = { ...state, routePlans: JSON.parse(JSON.stringify(snap.routePlans)) };
   }
-  if (snapshotBefore.reminderSettings) {
-    state = { ...state, reminderSettings: { ...state.reminderSettings, ...snapshotBefore.reminderSettings } };
+  if (snap.reminderSettings) {
+    state = { ...state, reminderSettings: { ...state.reminderSettings, ...snap.reminderSettings } };
   }
-  if (snapshotBefore.riskRules) {
-    state = { ...state, riskRules: { ...state.riskRules, ...snapshotBefore.riskRules } };
+  if (snap.riskRules) {
+    state = { ...state, riskRules: { ...state.riskRules, ...snap.riskRules } };
   }
-  if (snapshotBefore.autoPlanConfig) {
-    state = { ...state, autoPlanConfig: { ...state.autoPlanConfig, ...snapshotBefore.autoPlanConfig } };
+  if (snap.autoPlanConfig) {
+    state = { ...state, autoPlanConfig: { ...state.autoPlanConfig, ...snap.autoPlanConfig } };
   }
   return state;
 }
