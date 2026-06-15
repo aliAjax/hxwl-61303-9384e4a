@@ -224,7 +224,9 @@ const DEFAULT_AUTO_PLAN_CONFIG = {
   priorityOverdue: true,
   prioritySoon: true,
   allowAdvanceScheduling: false,
-  maxAdvanceDays: 0
+  maxAdvanceDays: 0,
+  ownerFairness: true,
+  considerExistingRoutes: true
 };
 
 const appDefaults = {
@@ -1267,6 +1269,7 @@ function App() {
   const [tempAutoPlanConfig, setTempAutoPlanConfig] = useState(loadAutoPlanConfig);
   const [showAutoPlanConfig, setShowAutoPlanConfig] = useState(false);
   const [expandedPlanDates, setExpandedPlanDates] = useState({});
+  const [expandedUnassigned, setExpandedUnassigned] = useState({});
   const [planEditItem, setPlanEditItem] = useState(null);
   const [planEditForm, setPlanEditForm] = useState({ date: '', owner: '' });
   const [showEstateSuggestions, setShowEstateSuggestions] = useState(false);
@@ -2642,14 +2645,40 @@ function App() {
     return config.ownerDailyLimits?.[owner] ?? config.defaultDailyLimit;
   }
 
+  const ASSIGNMENT_REASON_LABELS = {
+    overdue_earliest: '逾期设备，安排在最早可用日期',
+    overdue_cluster: '逾期设备，与同楼盘集中安排',
+    today_due: '今日到期设备',
+    soon_due: '临近到期，优先安排',
+    earliest_available: '安排在最早可用日期',
+    estate_cluster: '与同楼盘设备集中安排',
+    owner_match: '匹配原负责人',
+    owner_reassign: '原负责人已满，改派其他负责人',
+    advance_schedule: '在允许范围内提前安排',
+    fairness_balance: '平衡负责人工作量',
+    default_owner_available: '默认负责人在该日期有空'
+  };
+
+  const BLOCKING_REASON_LABELS = {
+    all_dates_full: '计划期内所有日期所有负责人员额均已满',
+    owner_fully_booked: '原负责人在所有可用日期均已满，且未开启跨负责人分配',
+    advance_limit_exceeded: '到期日超出计划范围，且不允许提前排期',
+    out_of_plan_window: '到期日超出计划天数范围',
+    already_in_route: '该设备已在已确认的路线方案中',
+    no_owner_available: '无可用负责人信息',
+    no_next_date: '设备缺少下次维保日期',
+    completed: '设备已完成维保'
+  };
+
   function generateAutoPlan(config = autoPlanConfig) {
-    const planDays = config.planDays || 30;
+    const planDays = Math.max(7, Math.min(90, parseInt(config.planDays, 10) || 30));
     const dates = getNextDays(planDays);
     const datePlan = {};
     dates.forEach((d) => { datePlan[d] = []; });
 
     const ownerDailyCounts = {};
     const estateDailyCounts = {};
+    const ownerTotalCounts = {};
     dates.forEach((d) => {
       ownerDailyCounts[d] = {};
       estateDailyCounts[d] = {};
@@ -2665,52 +2694,75 @@ function App() {
       });
     }
 
-    Object.entries(routePlans).forEach(([date, plan]) => {
-      if (!datePlan[date]) return;
-      plan?.routes?.forEach((r) => {
-        r.deviceIds?.forEach((id) => {
-          if (draftExcludedFromRoute.has(id)) return;
-          recordsInRoutePlans.add(id);
-          const rec = records.find((x) => x.id === id);
-          if (rec) {
-            const owner = rec.owner || '未分配';
-            const estate = rec.estate;
-            ownerDailyCounts[date][owner] = (ownerDailyCounts[date][owner] || 0) + 1;
-            estateDailyCounts[date][estate] = (estateDailyCounts[date][estate] || 0) + 1;
-            routeRecordMeta.set(id, { owner, estate, date });
-          }
+    if (config.considerExistingRoutes !== false) {
+      Object.entries(routePlans).forEach(([date, plan]) => {
+        if (!datePlan[date]) return;
+        plan?.routes?.forEach((r) => {
+          r.deviceIds?.forEach((id) => {
+            if (draftExcludedFromRoute.has(id)) return;
+            recordsInRoutePlans.add(id);
+            const rec = records.find((x) => x.id === id);
+            if (rec) {
+              const owner = rec.owner || '未分配';
+              const estate = rec.estate;
+              ownerDailyCounts[date][owner] = (ownerDailyCounts[date][owner] || 0) + 1;
+              estateDailyCounts[date][estate] = (estateDailyCounts[date][estate] || 0) + 1;
+              ownerTotalCounts[owner] = (ownerTotalCounts[owner] || 0) + 1;
+              routeRecordMeta.set(id, { owner, estate, date });
+            }
+          });
         });
       });
-    });
+    }
 
+    const prefilteredInfo = [];
     const candidateRecords = records.filter((item) => {
-      if (item.status === '已完成') return false;
-      if (!item.nextDate) return false;
-      if (recordsInRoutePlans.has(item.id)) return false;
+      if (item.status === '已完成') {
+        prefilteredInfo.push({ recordId: item.id, reason: 'completed', estate: item.estate, building: item.building, elevatorNo: item.elevatorNo, owner: item.owner || '未分配', originalNextDate: item.nextDate, daysDiff: item.nextDate ? daysBetween(item.nextDate, today) : null });
+        return false;
+      }
+      if (!item.nextDate) {
+        prefilteredInfo.push({ recordId: item.id, reason: 'no_next_date', estate: item.estate, building: item.building, elevatorNo: item.elevatorNo, owner: item.owner || '未分配', originalNextDate: null, daysDiff: null });
+        return false;
+      }
+      if (recordsInRoutePlans.has(item.id)) {
+        const diff = daysBetween(item.nextDate, today);
+        prefilteredInfo.push({ recordId: item.id, reason: 'already_in_route', estate: item.estate, building: item.building, elevatorNo: item.elevatorNo, owner: item.owner || '未分配', originalNextDate: item.nextDate, daysDiff: diff });
+        return false;
+      }
       const diff = daysBetween(item.nextDate, today);
-
-      const advanceDays = config.allowAdvanceScheduling
-        ? Math.max(0, config.maxAdvanceDays || 0)
-        : 0;
+      const advanceDays = config.allowAdvanceScheduling ? Math.max(0, config.maxAdvanceDays || 0) : 0;
       const minDateIdx = diff < 0 ? 0 : Math.max(0, diff - advanceDays);
-      if (minDateIdx >= planDays) return false;
-      if (diff > planDays - 1) return false;
+
+      if (diff > planDays - 1 && !config.allowAdvanceScheduling) {
+        prefilteredInfo.push({ recordId: item.id, reason: 'advance_limit_exceeded', estate: item.estate, building: item.building, elevatorNo: item.elevatorNo, owner: item.owner || '未分配', originalNextDate: item.nextDate, daysDiff: diff });
+        return false;
+      }
+      if (minDateIdx >= planDays) {
+        prefilteredInfo.push({ recordId: item.id, reason: 'out_of_plan_window', estate: item.estate, building: item.building, elevatorNo: item.elevatorNo, owner: item.owner || '未分配', originalNextDate: item.nextDate, daysDiff: diff });
+        return false;
+      }
       return true;
     });
 
     const scoredRecords = candidateRecords.map((item) => {
       const diff = daysBetween(item.nextDate, today);
       let priority = 0;
+      let priorityReason = '';
       if (diff < 0) {
         priority = 1000 + Math.abs(diff) * 50;
+        priorityReason = 'overdue';
       } else if (diff === 0) {
         priority = 800;
+        priorityReason = 'today';
       } else {
         const advanceDays = reminderSettings[item.cycle] || 0;
         if (diff <= advanceDays) {
           priority = 600 - diff * 10;
+          priorityReason = 'soon';
         } else {
           priority = 100 - diff;
+          priorityReason = 'normal';
         }
       }
       return {
@@ -2718,6 +2770,7 @@ function App() {
         recordId: item.id,
         diff,
         priority,
+        priorityReason,
         estate: item.estate,
         owner: item.owner || '未分配'
       };
@@ -2729,58 +2782,136 @@ function App() {
       return a.estate.localeCompare(b.estate);
     });
 
-    function findBestDateAndOwner(scoredItem, preferredStartIdx = 0) {
-      const { record, diff, owner: defaultOwner } = scoredItem;
+    function getAllOwnersForDate(date) {
+      const ownerSet = new Set();
+      Object.keys(ownerDailyCounts[date] || {}).forEach((o) => { if (o !== '未分配') ownerSet.add(o); });
+      records.forEach((r) => { if (r.owner && r.owner !== '未分配') ownerSet.add(r.owner); });
+      return Array.from(ownerSet);
+    }
 
-      const advanceDays = config.allowAdvanceScheduling
-        ? Math.max(0, config.maxAdvanceDays || 0)
-        : 0;
-      const minDateIdx = diff < 0
-        ? Math.max(0, preferredStartIdx)
-        : Math.max(0, preferredStartIdx, diff - advanceDays);
+    function getOwnerTotalCount(owner) {
+      return ownerTotalCounts[owner] || 0;
+    }
+
+    function findBestDateAndOwner(scoredItem) {
+      const { record, diff, owner: defaultOwner, priorityReason } = scoredItem;
+      const advanceDays = config.allowAdvanceScheduling ? Math.max(0, config.maxAdvanceDays || 0) : 0;
+      const minDateIdx = diff < 0 ? 0 : Math.max(0, diff - advanceDays);
 
       let bestDateIdx = -1;
       let bestOwner = defaultOwner;
       let bestScore = -1;
+      let bestReasons = [];
+      const blockingReasonsPerDate = {};
+      let defaultOwnerAvailable = false;
+      let anyOwnerAvailable = false;
 
-      for (let i = Math.max(preferredStartIdx, minDateIdx); i < dates.length; i++) {
+      for (let i = minDateIdx; i < dates.length; i++) {
         const date = dates[i];
-        const candidates = [defaultOwner];
-        if (defaultOwner === '未分配') {
-          Object.keys(ownerDailyCounts[date] || {}).forEach((o) => {
-            if (!candidates.includes(o) && o !== '未分配') candidates.push(o);
-          });
+        blockingReasonsPerDate[date] = [];
+        const dateBlocking = [];
+
+        const ownerCandidates = [];
+        if (defaultOwner && defaultOwner !== '未分配') {
+          ownerCandidates.push(defaultOwner);
+        }
+        getAllOwnersForDate(date).forEach((o) => {
+          if (!ownerCandidates.includes(o)) ownerCandidates.push(o);
+        });
+        if (ownerCandidates.length === 0) {
+          dateBlocking.push('no_owner_available');
         }
 
-        for (const owner of candidates) {
+        for (const owner of ownerCandidates) {
           const ownerLimit = getOwnerDailyLimit(owner, config);
           const currentOwnerCount = ownerDailyCounts[date][owner] || 0;
-          if (currentOwnerCount >= ownerLimit) continue;
+          if (currentOwnerCount >= ownerLimit) {
+            if (owner === defaultOwner) {
+              dateBlocking.push(`owner_full:${owner}`);
+            }
+            continue;
+          }
+
+          anyOwnerAvailable = true;
+          if (owner === defaultOwner) defaultOwnerAvailable = true;
 
           let estateCountBonus = 0;
+          let estateClusterActive = false;
           if (config.estateConcentration) {
-            estateCountBonus = (estateDailyCounts[date]?.[record.estate] || 0) +
+            const existingEstateCount = (estateDailyCounts[date]?.[record.estate] || 0) +
               datePlan[date].filter((item) => item.estate === record.estate).length;
+            if (existingEstateCount > 0) {
+              estateCountBonus = existingEstateCount;
+              estateClusterActive = true;
+            }
           }
 
           const datePreference = i === minDateIdx ? 10 : 0;
-          const ownerPreference = owner === defaultOwner ? 5 : 0;
-          const totalScore = estateCountBonus * 10 + datePreference + ownerPreference;
+          const ownerPreference = owner === defaultOwner ? 8 : 0;
+          const clusterBonus = estateClusterActive ? estateCountBonus * 10 : 0;
+
+          let fairnessBonus = 0;
+          if (config.ownerFairness) {
+            const totalCnt = getOwnerTotalCount(owner) + (ownerDailyCounts[date][owner] || 0);
+            const allCounts = Object.values(ownerDailyCounts).reduce((sum, dayCounts) => {
+              Object.entries(dayCounts).forEach(([o, c]) => { sum[o] = (sum[o] || 0) + c; });
+              return sum;
+            }, {});
+            const avgCount = Object.values(allCounts).length > 0
+              ? Object.values(allCounts).reduce((a, b) => a + b, 0) / Object.values(allCounts).length
+              : 0;
+            if (totalCnt < avgCount) fairnessBonus = 6;
+          }
+
+          const totalScore = clusterBonus + datePreference + ownerPreference + fairnessBonus;
 
           if (totalScore > bestScore) {
             bestScore = totalScore;
             bestDateIdx = i;
             bestOwner = owner;
+
+            const reasons = [];
+            if (priorityReason === 'overdue') reasons.push(diff < 0 && i === minDateIdx ? 'overdue_earliest' : 'overdue_cluster');
+            if (priorityReason === 'today') reasons.push('today_due');
+            if (priorityReason === 'soon' && i === minDateIdx) reasons.push('soon_due');
+            if (estateClusterActive) reasons.push('estate_cluster');
+            if (owner === defaultOwner) reasons.push('owner_match');
+            if (owner !== defaultOwner && defaultOwner !== '未分配') reasons.push('owner_reassign');
+            if (diff >= 0 && i < diff && config.allowAdvanceScheduling) reasons.push('advance_schedule');
+            if (config.ownerFairness && fairnessBonus > 0) reasons.push('fairness_balance');
+            if (i === minDateIdx && !reasons.includes('overdue_earliest') && !reasons.includes('soon_due')) reasons.push('earliest_available');
+            if (reasons.length === 0) reasons.push('default_owner_available');
+
+            bestReasons = reasons;
           }
         }
 
-        if (bestDateIdx !== -1 && i === minDateIdx && bestOwner === defaultOwner) {
-          break;
+        if (dateBlocking.length > 0) {
+          blockingReasonsPerDate[date] = dateBlocking;
         }
       }
 
       if (bestDateIdx === -1) {
-        return { date: null, owner: defaultOwner };
+        const detailedBlocking = [];
+        if (!anyOwnerAvailable) {
+          detailedBlocking.push('no_owner_available');
+        } else if (!defaultOwnerAvailable && defaultOwner !== '未分配') {
+          detailedBlocking.push('owner_fully_booked');
+        } else {
+          detailedBlocking.push('all_dates_full');
+        }
+        const dateRangeBlocking = Object.entries(blockingReasonsPerDate)
+          .filter(([_, r]) => r && r.length > 0)
+          .slice(0, 5)
+          .map(([date, reasons]) => ({ date, reasons }));
+
+        return {
+          date: null,
+          owner: defaultOwner,
+          reasons: [],
+          blockingReasons: detailedBlocking,
+          blockingDetails: dateRangeBlocking
+        };
       }
 
       const finalDate = dates[bestDateIdx];
@@ -2788,21 +2919,43 @@ function App() {
       const finalLimit = getOwnerDailyLimit(finalOwner, config);
       const finalCount = ownerDailyCounts[finalDate][finalOwner] || 0;
       if (finalCount >= finalLimit) {
-        return { date: null, owner: finalOwner };
+        return {
+          date: null,
+          owner: finalOwner,
+          reasons: [],
+          blockingReasons: ['all_dates_full'],
+          blockingDetails: []
+        };
       }
 
-      return { date: finalDate, owner: finalOwner };
+      return {
+        date: finalDate,
+        owner: finalOwner,
+        reasons: bestReasons,
+        blockingReasons: [],
+        blockingDetails: []
+      };
     }
 
     const draftItems = [];
     const unassignedItems = [];
 
     scoredRecords.forEach((scoredItem) => {
-      const { date, owner } = findBestDateAndOwner(scoredItem);
-      if (date) {
-        const ownerLimit = getOwnerDailyLimit(owner, config);
-        if ((ownerDailyCounts[date][owner] || 0) >= ownerLimit) {
-          unassignedItems.push(scoredItem);
+      const result = findBestDateAndOwner(scoredItem);
+      if (result.date) {
+        const ownerLimit = getOwnerDailyLimit(result.owner, config);
+        if ((ownerDailyCounts[result.date][result.owner] || 0) >= ownerLimit) {
+          unassignedItems.push({
+            recordId: scoredItem.recordId,
+            estate: scoredItem.estate,
+            building: scoredItem.record.building,
+            elevatorNo: scoredItem.record.elevatorNo,
+            owner: scoredItem.owner,
+            originalNextDate: scoredItem.record.nextDate,
+            daysDiff: scoredItem.diff,
+            blockingReasons: ['all_dates_full'],
+            blockingDetails: []
+          });
           return;
         }
 
@@ -2814,21 +2967,43 @@ function App() {
           elevatorNo: scoredItem.record.elevatorNo,
           cycle: scoredItem.record.cycle,
           originalNextDate: scoredItem.record.nextDate,
-          plannedDate: date,
-          owner: owner,
+          plannedDate: result.date,
+          owner: result.owner,
           originalOwner: scoredItem.owner,
-          ownerReassigned: owner !== scoredItem.owner,
+          ownerReassigned: result.owner !== scoredItem.owner,
           priority: scoredItem.priority,
           daysDiff: scoredItem.diff,
-          status: 'draft'
+          status: 'draft',
+          assignmentReasons: result.reasons
         };
-        datePlan[date].push(planItem);
-        ownerDailyCounts[date][owner] = (ownerDailyCounts[date][owner] || 0) + 1;
+        datePlan[result.date].push(planItem);
+        ownerDailyCounts[result.date][result.owner] = (ownerDailyCounts[result.date][result.owner] || 0) + 1;
+        estateDailyCounts[result.date][scoredItem.estate] = (estateDailyCounts[result.date][scoredItem.estate] || 0) + 1;
+        ownerTotalCounts[result.owner] = (ownerTotalCounts[result.owner] || 0) + 1;
         draftItems.push(planItem);
       } else {
-        unassignedItems.push(scoredItem);
+        unassignedItems.push({
+          recordId: scoredItem.recordId,
+          estate: scoredItem.estate,
+          building: scoredItem.record.building,
+          elevatorNo: scoredItem.record.elevatorNo,
+          owner: scoredItem.owner,
+          originalNextDate: scoredItem.record.nextDate,
+          daysDiff: scoredItem.diff,
+          blockingReasons: result.blockingReasons,
+          blockingDetails: result.blockingDetails
+        });
       }
     });
+
+    const allUnassigned = [
+      ...unassignedItems,
+      ...prefilteredInfo.map((info) => ({
+        ...info,
+        blockingReasons: [info.reason],
+        blockingDetails: []
+      }))
+    ];
 
     Object.keys(datePlan).forEach((date) => {
       datePlan[date].sort((a, b) => {
@@ -2844,16 +3019,10 @@ function App() {
       dates: datePlan,
       dateList: dates,
       totalCount: draftItems.length,
-      unassignedCount: unassignedItems.length,
-      unassignedItems: unassignedItems.map((si) => ({
-        recordId: si.recordId,
-        estate: si.estate,
-        building: si.record.building,
-        elevatorNo: si.record.elevatorNo,
-        owner: si.owner,
-        originalNextDate: si.record.nextDate,
-        daysDiff: si.diff
-      }))
+      unassignedCount: allUnassigned.length,
+      unassignedItems: allUnassigned,
+      prefilterCount: prefilteredInfo.length,
+      algorithmVersion: 'constraint-explainable-v1'
     };
 
     setAutoPlanDraft(draft);
@@ -2865,16 +3034,20 @@ function App() {
       aggregateId: draft.id,
       actor: '自动计划生成器',
       payload: {
-        planDays: config.planDays || 30,
+        planDays: planDays,
         allowAdvanceScheduling: !!config.allowAdvanceScheduling,
         maxAdvanceDays: config.maxAdvanceDays || 0,
         estateConcentration: !!config.estateConcentration,
+        ownerFairness: !!config.ownerFairness,
+        considerExistingRoutes: config.considerExistingRoutes !== false,
         defaultDailyLimit: config.defaultDailyLimit || 0,
         ownerLimitCount: Object.keys(config.ownerDailyLimits || {}).length,
         candidateCount: scoredRecords.length,
+        prefilterCount: prefilteredInfo.length,
         totalCount: draftItems.length,
-        unassignedCount: unassignedItems.length,
+        unassignedCount: allUnassigned.length,
         dayCount: dates.length,
+        algorithmVersion: 'constraint-explainable-v1',
         byOwnerCount: Object.fromEntries(
           Object.entries(
             draftItems.reduce((acc, it) => { acc[it.owner] = (acc[it.owner] || 0) + 1; return acc; }, {})
@@ -5984,6 +6157,28 @@ function App() {
                     <p>关闭时，设备只能在到期日或之后安排；开启时可设置最大提前天数</p>
                   </div>
                 </label>
+                <label className="config-toggle">
+                  <input
+                    type="checkbox"
+                    checked={tempAutoPlanConfig.ownerFairness !== false}
+                    onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, ownerFairness: e.target.checked })}
+                  />
+                  <div>
+                    <strong>负责人公平分配</strong>
+                    <p>平衡各负责人的总工作量，工作量低于平均值的负责人将获得优先分配</p>
+                  </div>
+                </label>
+                <label className="config-toggle">
+                  <input
+                    type="checkbox"
+                    checked={tempAutoPlanConfig.considerExistingRoutes !== false}
+                    onChange={(e) => setTempAutoPlanConfig({ ...tempAutoPlanConfig, considerExistingRoutes: e.target.checked })}
+                  />
+                  <div>
+                    <strong>考虑已存在路线方案</strong>
+                    <p>已在确认路线方案中的设备将被跳过，并占用对应负责人和日期的容量</p>
+                  </div>
+                </label>
                 {tempAutoPlanConfig.allowAdvanceScheduling && (
                   <label className="config-toggle config-toggle-with-input">
                     <div>
@@ -6882,6 +7077,14 @@ function App() {
                 <AlertTriangle size={14} />
                 逾期优先：{autoPlanConfig.priorityOverdue ? '开启' : '关闭'}
               </div>
+              <div className="config-tag">
+                <Users size={14} />
+                公平分配：{autoPlanConfig.ownerFairness !== false ? '开启' : '关闭'}
+              </div>
+              <div className="config-tag">
+                <Route size={14} />
+                考虑路线：{autoPlanConfig.considerExistingRoutes !== false ? '开启' : '关闭'}
+              </div>
             </div>
           </div>
 
@@ -6895,8 +7098,11 @@ function App() {
                   <li><AlertOctagon size={16} /> 优先安排<strong>逾期</strong>和<strong>临近到期</strong>的设备</li>
                   <li><Building size={16} /> <strong>同一楼盘</strong>的设备尽量集中在同一天，减少路途消耗</li>
                   <li><UserX size={16} /> 每位负责人<strong>每日任务不超过</strong>配置的上限</li>
-                  <li><CheckCircle2 size={16} /> 自动<strong>排除已完成</strong>的维保记录</li>
-                  <li><ClipboardList size={16} /> 生成结果为<strong>可编辑草稿</strong>，确认后才写入记录</li>
+                  <li><Users size={16} /> <strong>公平分配</strong>工作量，平衡各负责人负载</li>
+                  <li><Route size={16} /> 自动<strong>考虑已确认路线方案</strong>，避免重复排期</li>
+                  <li><Zap size={16} /> 每台设备<strong>显示排期原因</strong>，可解释每项决策</li>
+                  <li><XCircle size={16} /> 无法安排的设备<strong>给出阻塞原因</strong>，支持调整约束后重生成</li>
+                  <li><CheckCircle2 size={16} /> 生成结果为<strong>可编辑草稿</strong>，确认后才写入记录</li>
                   <li><RotateCcw size={16} /> 所有操作保留<strong>历史记录</strong>，支持一键回滚</li>
                 </ul>
               </div>
@@ -7086,6 +7292,7 @@ function App() {
                                 const itemIssues = planDraftValidation.itemIssues?.[item.planId] || [];
                                 const hasCriticalIssue = itemIssues.some(i => i.severity === 'critical');
                                 const hasWarningIssue = itemIssues.some(i => i.severity === 'warning');
+                                const reasons = item.assignmentReasons || [];
                                 return (
                                   <div key={item.planId} className={'auto-plan-item ' + reminderStatusClass(rs.type) + (hasCriticalIssue ? ' has-critical-issue' : hasWarningIssue ? ' has-warning-issue' : '')}>
                                     <div className="auto-plan-item-main">
@@ -7117,6 +7324,21 @@ function App() {
                                       </div>
                                       <p>{item.elevatorNo} · {item.cycle} · <User size={12} /> {item.owner}</p>
                                       <p className="auto-plan-item-original">原定日期：{item.originalNextDate} → 计划：{item.plannedDate}</p>
+                                      {reasons.length > 0 && (
+                                        <div className="auto-plan-item-reasons">
+                                          <div className="reasons-title">
+                                            <Zap size={12} />
+                                            <span>排期原因</span>
+                                          </div>
+                                          <div className="reasons-tags">
+                                            {reasons.map((reasonKey, rIdx) => (
+                                              <span key={rIdx} className={'reason-tag reason-' + reasonKey}>
+                                                {ASSIGNMENT_REASON_LABELS[reasonKey] || reasonKey}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
                                       {itemIssues.length > 0 && (
                                         <div className="auto-plan-item-issues">
                                           {itemIssues.map((issue, idx) => (
@@ -7225,18 +7447,85 @@ function App() {
                         <AlertTriangle size={16} />
                         <h3>未能安排（{autoPlanDraft.unassignedItems.length}台）</h3>
                       </div>
+                      <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
+                        每台设备下方显示具体阻塞原因。您可调整约束后点击「重新生成」。
+                      </p>
                       <div className="unassigned-list">
-                        {autoPlanDraft.unassignedItems.map((item, idx) => (
-                          <div key={idx} className="unassigned-item">
-                            <div>
-                              <strong>{item.estate} {item.building}</strong>
-                              <p>{item.elevatorNo} · {item.owner}</p>
+                        {autoPlanDraft.unassignedItems.map((item, idx) => {
+                          const isExpanded = expandedUnassigned[idx];
+                          const blockingReasons = item.blockingReasons || [];
+                          const blockingDetails = item.blockingDetails || [];
+                          return (
+                            <div key={idx} className={'unassigned-item ' + (isExpanded ? 'is-expanded' : '')}>
+                              <div className="unassigned-item-head" onClick={() => setExpandedUnassigned({ ...expandedUnassigned, [idx]: !isExpanded })}>
+                                <div className="unassigned-item-main">
+                                  <strong>{item.estate} {item.building}</strong>
+                                  <p>{item.elevatorNo} · {item.owner}</p>
+                                </div>
+                                <div className="unassigned-item-right">
+                                  {item.daysDiff != null && (
+                                    <span className={'diff-tag ' + (item.daysDiff < 0 ? 'overdue' : 'soon')}>
+                                      {item.daysDiff < 0 ? `逾期${Math.abs(item.daysDiff)}天` : `+${item.daysDiff}天`}
+                                    </span>
+                                  )}
+                                  <ChevronDown size={14} className={'chevron-icon ' + (isExpanded ? 'expanded' : '')} />
+                                </div>
+                              </div>
+                              {isExpanded && (
+                                <div className="unassigned-item-details">
+                                  <div className="blocking-reasons-title">
+                                    <XCircle size={12} />
+                                    <span>阻塞原因</span>
+                                  </div>
+                                  <div className="blocking-reasons-list">
+                                    {blockingReasons.length > 0 ? (
+                                      blockingReasons.map((reasonKey, rIdx) => (
+                                        <div key={rIdx} className={'blocking-reason-tag blocking-' + reasonKey}>
+                                          {BLOCKING_REASON_LABELS[reasonKey] || reasonKey}
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <div className="blocking-reason-tag">
+                                        无详细原因
+                                      </div>
+                                    )}
+                                  </div>
+                                  {blockingDetails.length > 0 && (
+                                    <div className="blocking-details-list">
+                                      <div className="blocking-details-title">按日期详情（前5天）</div>
+                                      {blockingDetails.map((bd, bdIdx) => (
+                                        <div key={bdIdx} className="blocking-detail-row">
+                                          <span className="blocking-detail-date">{bd.date}</span>
+                                          <span className="blocking-detail-reasons">
+                                            {bd.reasons.map((r, rIdx) => {
+                                              const label = r.startsWith('owner_full:')
+                                                ? `${r.replace('owner_full:', '')} 已满`
+                                                : (BLOCKING_REASON_LABELS[r] || r);
+                                              return (
+                                                <span key={rIdx} className="blocking-detail-chip">
+                                                  {label}
+                                                </span>
+                                              );
+                                            })}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                  <div className="unassigned-suggest-actions">
+                                    <button
+                                      className="small-btn secondary-btn"
+                                      onClick={() => openAutoPlanConfigModal()}
+                                    >
+                                      <Settings size={12} />
+                                      调整约束并重新生成
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
                             </div>
-                            <span className={'diff-tag ' + (item.daysDiff < 0 ? 'overdue' : 'soon')}>
-                              {item.daysDiff < 0 ? `逾期${Math.abs(item.daysDiff)}天` : `+${item.daysDiff}天`}
-                            </span>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
