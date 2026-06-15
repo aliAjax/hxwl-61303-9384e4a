@@ -2375,9 +2375,152 @@ function App() {
     setPlanEditItem(null);
   }
 
+  function validatePlanDraft(draft = autoPlanDraft) {
+    if (!draft) {
+      return { valid: true, criticalIssues: [], warnings: [], itemIssues: {} };
+    }
+
+    const criticalIssues = [];
+    const warnings = [];
+    const itemIssues = {};
+
+    const recordIdToPlanIds = {};
+    Object.entries(draft.dates).forEach(([date, items]) => {
+      items.forEach((item) => {
+        if (!recordIdToPlanIds[item.recordId]) {
+          recordIdToPlanIds[item.recordId] = [];
+        }
+        recordIdToPlanIds[item.recordId].push({ planId: item.planId, date, item });
+      });
+    });
+
+    Object.entries(recordIdToPlanIds).forEach(([recordId, occurrences]) => {
+      if (occurrences.length > 1) {
+        const dates = occurrences.map(o => o.date).join('、');
+        const firstItem = occurrences[0].item;
+        criticalIssues.push({
+          type: 'duplicate_device',
+          severity: 'critical',
+          title: '设备重复排期',
+          description: `${firstItem.estate} ${firstItem.building}（${firstItem.elevatorNo}）在草稿中被安排了 ${occurrences.length} 次，涉及日期：${dates}`,
+          recordId,
+          planIds: occurrences.map(o => o.planId),
+          elevatorNo: firstItem.elevatorNo,
+          estate: firstItem.estate
+        });
+        occurrences.forEach(o => {
+          if (!itemIssues[o.planId]) itemIssues[o.planId] = [];
+          itemIssues[o.planId].push({
+            type: 'duplicate_device',
+            severity: 'critical',
+            message: `该设备在草稿中重复排期（${occurrences.length}次）`
+          });
+        });
+      }
+    });
+
+    const recordMap = new Map(records.map(r => [r.id, r]));
+    Object.entries(draft.dates).forEach(([date, items]) => {
+      items.forEach((item) => {
+        const record = recordMap.get(item.recordId);
+        if (record && record.status === '已完成') {
+          criticalIssues.push({
+            type: 'completed_device',
+            severity: 'critical',
+            title: '已完成设备在草稿中',
+            description: `${item.estate} ${item.building}（${item.elevatorNo}）当前状态为「已完成」，不应再出现在计划草稿中`,
+            recordId: item.recordId,
+            planIds: [item.planId],
+            elevatorNo: item.elevatorNo,
+            estate: item.estate
+          });
+          if (!itemIssues[item.planId]) itemIssues[item.planId] = [];
+          itemIssues[item.planId].push({
+            type: 'completed_device',
+            severity: 'critical',
+            message: '该设备已完成维保，请从计划中移除'
+          });
+        }
+      });
+    });
+
+    const ownerDailyCounts = {};
+    Object.entries(draft.dates).forEach(([date, items]) => {
+      ownerDailyCounts[date] = {};
+      items.forEach((item) => {
+        const owner = item.owner || '未分配';
+        ownerDailyCounts[date][owner] = (ownerDailyCounts[date][owner] || 0) + 1;
+      });
+    });
+
+    const config = draft.config || autoPlanConfig;
+    Object.entries(ownerDailyCounts).forEach(([date, owners]) => {
+      Object.entries(owners).forEach(([owner, count]) => {
+        const limit = getOwnerDailyLimit(owner, config);
+        if (count > limit) {
+          const overloadedItems = (draft.dates[date] || []).filter(it => (it.owner || '未分配') === owner);
+          warnings.push({
+            type: 'owner_overload',
+            severity: 'warning',
+            title: `${owner} 任务超限`,
+            description: `${date} ${owner} 安排了 ${count} 台设备，超出每日上限（${limit}台）${count - limit}台`,
+            date,
+            owner,
+            count,
+            limit,
+            planIds: overloadedItems.map(i => i.planId)
+          });
+          overloadedItems.forEach(it => {
+            if (!itemIssues[it.planId]) itemIssues[it.planId] = [];
+            itemIssues[it.planId].push({
+              type: 'owner_overload',
+              severity: 'warning',
+              message: `负责人当日任务超限（${count}/${limit}台）`
+            });
+          });
+        }
+      });
+    });
+
+    const hasCritical = criticalIssues.length > 0;
+    const hasWarnings = warnings.length > 0;
+
+    return {
+      valid: !hasCritical,
+      criticalIssues,
+      warnings,
+      itemIssues,
+      hasCritical,
+      hasWarnings,
+      totalIssueCount: criticalIssues.length + warnings.length
+    };
+  }
+
+  const planDraftValidation = useMemo(() => {
+    return validatePlanDraft(autoPlanDraft);
+  }, [autoPlanDraft, records, autoPlanConfig]);
+
   function confirmAutoPlan() {
     if (!autoPlanDraft) return;
-    if (!confirm('确认提交此计划？系统将：\n1. 更新所有计划设备的维保日期\n2. 将状态设置为「今日执行」（当天日期的设备）\n3. 自动生成路线方案\n4. 记录操作历史以便回滚')) return;
+
+    const validation = validatePlanDraft(autoPlanDraft);
+    if (validation.hasCritical) {
+      alert(`存在严重问题，无法确认计划：\n\n${validation.criticalIssues.slice(0, 5).map((i, idx) => `${idx + 1}. ${i.title}：${i.description}`).join('\n')}${validation.criticalIssues.length > 5 ? `\n...还有 ${validation.criticalIssues.length - 5} 条严重问题` : ''}\n\n请先解决上述问题后再确认计划。`);
+      return;
+    }
+
+    let confirmMessage = '确认提交此计划？系统将：\n1. 更新所有计划设备的维保日期\n2. 将状态设置为「今日执行」（当天日期的设备）\n3. 自动生成路线方案\n4. 记录操作历史以便回滚';
+    if (validation.hasWarnings) {
+      confirmMessage += `\n\n⚠️  注意：当前存在 ${validation.warnings.length} 条提醒：`;
+      validation.warnings.slice(0, 5).forEach((w, idx) => {
+        confirmMessage += `\n  ${idx + 1}. ${w.description}`;
+      });
+      if (validation.warnings.length > 5) {
+        confirmMessage += `\n  ...还有 ${validation.warnings.length - 5} 条提醒`;
+      }
+      confirmMessage += '\n\n这些问题不会阻止计划确认，但建议您先调整。是否仍然继续？';
+    }
+    if (!confirm(confirmMessage)) return;
 
     const snapshot = {
       records: JSON.parse(JSON.stringify(records)),
@@ -2484,16 +2627,35 @@ function App() {
       Array.from(globalDeviceFirstSeen.values())
     ).size;
 
+    const finalValidation = validatePlanDraft(autoPlanDraft);
+    const warningCount = finalValidation.warnings.length;
+    const warningSummary = warningCount > 0 ? finalValidation.warnings.slice(0, 20).map(w => ({
+      type: w.type,
+      title: w.title,
+      description: w.description,
+      date: w.date,
+      owner: w.owner,
+      count: w.count,
+      limit: w.limit
+    })) : [];
+
+    let descriptionText = `确认维保计划（实际写入 ${actualAffectedCount} 台设备，${actualDayCount} 天`;
+    if (skippedItems.length > 0) descriptionText += `，跳过 ${skippedItems.length} 条冲突`;
+    if (warningCount > 0) descriptionText += `，含 ${warningCount} 条容量提醒`;
+    descriptionText += '）';
+
     const historyEntry = {
       id: planUid(),
       type: 'confirm',
       planId: autoPlanDraft.id,
       timestamp: new Date().toISOString(),
-      description: `确认维保计划（实际写入 ${actualAffectedCount} 台设备，${actualDayCount} 天${skippedItems.length > 0 ? `，跳过 ${skippedItems.length} 条冲突` : ''}）`,
+      description: descriptionText,
       snapshot,
       affectedCount: actualAffectedCount,
       skippedCount: skippedItems.length,
-      skippedItems: skippedItems.slice(0, 50)
+      skippedItems: skippedItems.slice(0, 50),
+      validationWarnings: warningSummary,
+      validationWarningCount: warningCount
     };
     const newHistory = [historyEntry, ...autoPlanHistory];
     setAutoPlanHistory(newHistory);
@@ -2513,6 +2675,15 @@ function App() {
       Object.entries(uniqueReasons).forEach(([r, c]) => {
         msg += `\n  · ${r} × ${c}`;
       });
+    }
+    if (warningCount > 0) {
+      msg += `\n\n📋  已记录 ${warningCount} 条容量提醒：`;
+      finalValidation.warnings.slice(0, 5).forEach((w) => {
+        msg += `\n  · ${w.description}`;
+      });
+      if (warningCount > 5) {
+        msg += `\n  ...还有 ${warningCount - 5} 条提醒，详情见操作历史`;
+      }
     }
     msg += `\n\n您可以在「操作历史」中回滚此操作。`;
     alert(msg);
@@ -5624,9 +5795,14 @@ function App() {
                       <Trash2 size={14} />
                       放弃草稿
                     </button>
-                    <button className="primary small-btn confirm-plan-btn" onClick={confirmAutoPlan}>
+                    <button 
+                      className={'primary small-btn confirm-plan-btn ' + (planDraftValidation.hasCritical ? 'disabled-btn' : '')}
+                      onClick={confirmAutoPlan}
+                      disabled={planDraftValidation.hasCritical}
+                      title={planDraftValidation.hasCritical ? '存在严重问题，请先解决后再确认' : (planDraftValidation.hasWarnings ? '存在提醒事项，仍可确认' : '')}
+                    >
                       <CheckCircle2 size={14} />
-                      确认并提交计划
+                      {planDraftValidation.hasCritical ? '存在严重问题，无法确认' : (planDraftValidation.hasWarnings ? `确认计划（${planDraftValidation.warnings.length}条提醒）` : '确认并提交计划')}
                     </button>
                   </>
                 )}
@@ -5716,6 +5892,83 @@ function App() {
                 </section>
               )}
 
+              {planDraftValidation.totalIssueCount > 0 && (
+                <section className={'panel plan-validation-panel ' + (planDraftValidation.hasCritical ? 'has-critical' : 'has-warnings')}>
+                  <div className="panel-title">
+                    {planDraftValidation.hasCritical ? (
+                      <>
+                        <AlertOctagon size={18} />
+                        <h2>草稿校验发现 {planDraftValidation.criticalIssues.length} 个严重问题，无法确认计划</h2>
+                      </>
+                    ) : (
+                      <>
+                        <AlertTriangle size={18} />
+                        <h2>草稿校验发现 {planDraftValidation.warnings.length} 条提醒，可继续确认</h2>
+                      </>
+                    )}
+                  </div>
+                  {planDraftValidation.hasCritical && (
+                    <div className="validation-issues-section">
+                      <div className="validation-section-title">
+                        <AlertOctagon size={14} />
+                        <span>严重问题（{planDraftValidation.criticalIssues.length}）</span>
+                      </div>
+                      <div className="validation-issues-list">
+                        {planDraftValidation.criticalIssues.map((issue, idx) => (
+                          <div key={`critical-${idx}`} className={'validation-issue-item issue-' + issue.type}>
+                            <div className="issue-head">
+                              <AlertOctagon size={14} />
+                              <strong>{issue.title}</strong>
+                            </div>
+                            <p>{issue.description}</p>
+                            {issue.type === 'duplicate_device' && issue.planIds && (
+                              <button
+                                className="small-btn secondary-btn"
+                                onClick={() => {
+                                  const sorted = [...issue.planIds].slice(1);
+                                  sorted.forEach((pid) => removePlanItem(pid));
+                                }}
+                              >
+                                <Trash2 size={12} />
+                                保留首个，移除其余重复项
+                              </button>
+                            )}
+                            {issue.type === 'completed_device' && issue.planIds && (
+                              <button
+                                className="small-btn secondary-btn"
+                                onClick={() => issue.planIds.forEach((pid) => removePlanItem(pid))}
+                              >
+                                <Trash2 size={12} />
+                                从计划中移除
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {planDraftValidation.hasWarnings && (
+                    <div className="validation-issues-section">
+                      <div className="validation-section-title">
+                        <AlertTriangle size={14} />
+                        <span>提醒事项（{planDraftValidation.warnings.length}）</span>
+                      </div>
+                      <div className="validation-issues-list">
+                        {planDraftValidation.warnings.map((issue, idx) => (
+                          <div key={`warn-${idx}`} className={'validation-issue-item issue-' + issue.type}>
+                            <div className="issue-head">
+                              <AlertTriangle size={14} />
+                              <strong>{issue.title}</strong>
+                            </div>
+                            <p>{issue.description}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
+
               <div className="auto-plan-layout">
                 <section className="panel auto-plan-dates-panel">
                   <div className="panel-title-with-actions">
@@ -5779,8 +6032,11 @@ function App() {
                                 if (isOverdue) diffLabel = `逾期${Math.abs(item.daysDiff)}天`;
                                 else if (isTodayDue) diffLabel = '今日到期';
                                 else diffLabel = `+${item.daysDiff}天`;
+                                const itemIssues = planDraftValidation.itemIssues?.[item.planId] || [];
+                                const hasCriticalIssue = itemIssues.some(i => i.severity === 'critical');
+                                const hasWarningIssue = itemIssues.some(i => i.severity === 'warning');
                                 return (
-                                  <div key={item.planId} className={'auto-plan-item ' + reminderStatusClass(rs.type)}>
+                                  <div key={item.planId} className={'auto-plan-item ' + reminderStatusClass(rs.type) + (hasCriticalIssue ? ' has-critical-issue' : hasWarningIssue ? ' has-warning-issue' : '')}>
                                     <div className="auto-plan-item-main">
                                       <div className="auto-plan-item-head">
                                         <h4>{item.estate} {item.building}</h4>
@@ -5794,10 +6050,32 @@ function App() {
                                               调整日期
                                             </span>
                                           )}
+                                          {hasCriticalIssue && (
+                                            <span className="diff-tag critical-issue" title={itemIssues.filter(i => i.severity === 'critical').map(i => i.message).join('；')}>
+                                              <AlertOctagon size={10} />
+                                              严重问题
+                                            </span>
+                                          )}
+                                          {!hasCriticalIssue && hasWarningIssue && (
+                                            <span className="diff-tag warning-issue" title={itemIssues.filter(i => i.severity === 'warning').map(i => i.message).join('；')}>
+                                              <AlertTriangle size={10} />
+                                              容量提醒
+                                            </span>
+                                          )}
                                         </div>
                                       </div>
                                       <p>{item.elevatorNo} · {item.cycle} · <User size={12} /> {item.owner}</p>
                                       <p className="auto-plan-item-original">原定日期：{item.originalNextDate} → 计划：{item.plannedDate}</p>
+                                      {itemIssues.length > 0 && (
+                                        <div className="auto-plan-item-issues">
+                                          {itemIssues.map((issue, idx) => (
+                                            <div key={idx} className={'item-issue-tag item-issue-' + issue.severity}>
+                                              {issue.severity === 'critical' ? <AlertOctagon size={12} /> : <AlertTriangle size={12} />}
+                                              {issue.message}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
                                     </div>
                                     <div className="auto-plan-item-actions">
                                       <button className="small-icon-btn" onClick={() => openPlanItemEdit(item)} title="调整计划">
@@ -5932,6 +6210,24 @@ function App() {
                               </span>
                             </div>
                             <p className="history-desc">{entry.description}</p>
+                            {entry.type === 'confirm' && entry.validationWarningCount > 0 && entry.validationWarnings && (
+                              <div className="history-warnings">
+                                <div className="history-warnings-head">
+                                  <AlertTriangle size={12} />
+                                  <span>容量提醒（{entry.validationWarningCount}条）</span>
+                                </div>
+                                <div className="history-warnings-list">
+                                  {entry.validationWarnings.slice(0, 3).map((w, idx) => (
+                                    <div key={idx} className="history-warning-item">
+                                      <span className="history-warning-desc">{w.description}</span>
+                                    </div>
+                                  ))}
+                                  {entry.validationWarnings.length > 3 && (
+                                    <div className="history-warning-more">还有 {entry.validationWarnings.length - 3} 条...</div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
                             {entry.type === 'confirm' && entry.snapshot && (
                               <button className="rollback-btn" onClick={() => rollbackHistoryEntry(entry.id)}>
                                 <RotateCcw size={12} />
