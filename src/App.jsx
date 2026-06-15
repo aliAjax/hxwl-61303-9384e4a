@@ -5049,7 +5049,7 @@ function App() {
               </label>
             </div>
 
-            <p className="hint">调整后设备将重新归类到对应日期的计划中，系统不会检查上限，请合理安排。</p>
+            <p className="hint">调整后设备将重新归类到对应日期的计划中，并重新校验负责人上限、重复排期和已完成设备。</p>
 
             <div className="modal-actions">
               <button type="button" className="secondary-btn" onClick={() => { setPlanEditItem(null); setPlanEditForm({ date: '', owner: '' }); }}>取消</button>
