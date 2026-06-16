@@ -3,7 +3,14 @@
     "dev": "vite --host 0.0.0.0 --port 61303",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 61303",
-    "test": "vitest run"
+    "typecheck": "tsc -b",
+    "typecheck:watch": "tsc -b --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "ci:check": "npm run typecheck && npm run test",
+    "prebuild": "npm run ci:check",
+    "prepack": "npm run ci:check"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

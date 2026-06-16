@@ -1,0 +1,67 @@
+name: CI - 电梯维保看板
+
+on:
+  push:
+    branches: [main, master, develop, feature/*]
+  pull_request:
+    branches: [main, master, develop]
+
+jobs:
+  quality-gate:
+    name: 质量门禁 (类型检查 + 测试 + 构建)
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: 安装依赖 (npm ci)
+        run: npm ci
+
+      - name: 类型检查 (tsc)
+        run: npm run typecheck
+        env:
+          CI: true
+
+      - name: 运行单元测试
+        run: npm test
+        env:
+          CI: true
+
+      - name: 生产构建验证
+        run: npm run build
+        env:
+          CI: true
+
+  test-windows:
+    name: Windows 兼容性测试
+    runs-on: windows-latest
+    needs: quality-gate
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 运行测试 (Windows)
+        run: npm test
+        env:
+          CI: true
