@@ -10,6 +10,56 @@ import {
   EventStore,
   EVENT_STORE_VERSION
 } from './eventStore.js';
+import {
+  MERGE_HISTORY_LIMIT,
+  CONFLICT_FIELDS,
+  uid,
+  migrateRecords,
+  loadRecords,
+  loadMergeHistory,
+  saveMergeHistory,
+  createDataSnapshot,
+  getCurrentFullState,
+  detectConflicts,
+  mergeTimelines,
+  buildMergeData,
+  validateMergeData,
+  buildExportData,
+  validateImportData,
+  downloadJSON,
+  assembleMergedRecords,
+  mergeImportSettings,
+  buildManualMergeInitialForm
+} from './dataImportExport.js';
+import {
+  parseImportText,
+  validateImportRecords
+} from './textImport.js';
+import {
+  normalizeRecordsForPersistence
+} from './recordUtils.js';
+import {
+  DEFAULT_REMINDER_SETTINGS,
+  DEFAULT_RISK_RULES,
+  DEFAULT_AUTO_PLAN_CONFIG,
+  appDefaults,
+  loadReminderSettings,
+  saveReminderSettings,
+  loadRiskRules,
+  saveRiskRules,
+  loadRoutePlans,
+  saveRoutePlans,
+  loadAutoPlanDraft,
+  saveAutoPlanDraft,
+  clearAutoPlanDraft,
+  loadAutoPlanHistory,
+  saveAutoPlanHistory,
+  loadAutoPlanConfig,
+  saveAutoPlanConfig,
+  getEmptyRoutePlan,
+  planUid,
+  routeUid
+} from './dataStorage.js';
 
 const appConfig = {
   "id": "hxwl-61303",
@@ -180,134 +230,12 @@ function daysBetween(dateText1, dateText2) {
   return Math.round((d1.getTime() - d2.getTime()) / 86400000);
 }
 
-const REMINDER_STORAGE_KEY = 'hxwl-61303-reminder-settings';
-const DEFAULT_REMINDER_SETTINGS = {
-  '7天': 2,
-  '15天': 3,
-  '30天': 7
-};
-
-const RISK_RULES_STORAGE_KEY = 'hxwl-61303-risk-rules';
-const DEFAULT_RISK_RULES = {
-  overdueEnabled: true,
-  overdueLabel: '逾期未维保',
-  soonExpireDays: 3,
-  soonExpireEnabled: true,
-  soonExpireLabel: '即将到期',
-  overloadThreshold: 5,
-  overloadEnabled: true,
-  overloadLabel: '任务过载',
-  estateConcentrationThreshold: 3,
-  estateConcentrationWindow: 7,
-  estateConcentrationEnabled: true,
-  estateConcentrationLabel: '集中到期'
-};
-
-const ROUTE_PLANS_STORAGE_KEY = 'hxwl-61303-route-plans';
-const DATA_EXPORT_VERSION = '1.1.0';
-const DATA_EXPORT_APP_ID = 'hxwl-61303-elevator-maintenance';
-const MERGE_DATA_VERSION = '1.0.0';
-const MERGE_DATA_APP_ID = 'hxwl-61303-elevator-maintenance';
-
-const MERGE_HISTORY_STORAGE_KEY = 'hxwl-61303-merge-history';
-const MERGE_HISTORY_LIMIT = 20;
-
-const AUTO_PLAN_DRAFT_STORAGE_KEY = 'hxwl-61303-auto-plan-draft';
-const AUTO_PLAN_HISTORY_STORAGE_KEY = 'hxwl-61303-auto-plan-history';
-const AUTO_PLAN_CONFIG_STORAGE_KEY = 'hxwl-61303-auto-plan-config';
-
-const DEFAULT_AUTO_PLAN_CONFIG = {
-  planDays: 30,
-  defaultDailyLimit: 5,
-  ownerDailyLimits: {},
-  estateConcentration: true,
-  priorityOverdue: true,
-  prioritySoon: true,
-  allowAdvanceScheduling: false,
-  maxAdvanceDays: 0,
-  ownerFairness: true,
-  considerExistingRoutes: true
-};
-
-const appDefaults = {
-  reminderSettings: DEFAULT_REMINDER_SETTINGS,
-  riskRules: DEFAULT_RISK_RULES,
-  autoPlanConfig: DEFAULT_AUTO_PLAN_CONFIG
-};
-
 let globalEventStore = null;
 function getEventStore() {
   if (!globalEventStore) {
     globalEventStore = new EventStore(appDefaults);
   }
   return globalEventStore;
-}
-
-function getCurrentFullState(currentRecords, currentReminderSettings, currentRoutePlans, currentRiskRules, currentAutoPlanConfig) {
-  return {
-    records: JSON.parse(JSON.stringify(currentRecords)),
-    routePlans: JSON.parse(JSON.stringify(currentRoutePlans)),
-    reminderSettings: JSON.parse(JSON.stringify(currentReminderSettings)),
-    riskRules: JSON.parse(JSON.stringify(currentRiskRules || {})),
-    autoPlanConfig: JSON.parse(JSON.stringify(currentAutoPlanConfig || {}))
-  };
-}
-
-function loadAutoPlanDraft() {
-  const raw = localStorage.getItem(AUTO_PLAN_DRAFT_STORAGE_KEY);
-  if (raw) {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-function saveAutoPlanDraft(draft) {
-  localStorage.setItem(AUTO_PLAN_DRAFT_STORAGE_KEY, JSON.stringify(draft));
-}
-
-function clearAutoPlanDraft() {
-  localStorage.removeItem(AUTO_PLAN_DRAFT_STORAGE_KEY);
-}
-
-function loadAutoPlanHistory() {
-  const raw = localStorage.getItem(AUTO_PLAN_HISTORY_STORAGE_KEY);
-  if (raw) {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-function saveAutoPlanHistory(history) {
-  localStorage.setItem(AUTO_PLAN_HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, 50)));
-}
-
-function loadAutoPlanConfig() {
-  const raw = localStorage.getItem(AUTO_PLAN_CONFIG_STORAGE_KEY);
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      return { ...DEFAULT_AUTO_PLAN_CONFIG, ...parsed };
-    } catch {
-      return { ...DEFAULT_AUTO_PLAN_CONFIG };
-    }
-  }
-  return { ...DEFAULT_AUTO_PLAN_CONFIG };
-}
-
-function saveAutoPlanConfig(config) {
-  localStorage.setItem(AUTO_PLAN_CONFIG_STORAGE_KEY, JSON.stringify(config));
-}
-
-function planUid() {
-  return 'plan_' + Math.random().toString(36).slice(2, 12);
 }
 
 function getNextDays(count) {
@@ -319,93 +247,6 @@ function getNextDays(count) {
     dates.push(formatDate(d));
   }
   return dates;
-}
-
-function loadRoutePlans() {
-  const raw = localStorage.getItem(ROUTE_PLANS_STORAGE_KEY);
-  if (raw) {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
-  }
-  return {};
-}
-
-function saveRoutePlans(plans) {
-  localStorage.setItem(ROUTE_PLANS_STORAGE_KEY, JSON.stringify(plans));
-}
-
-function getEmptyRoutePlan(date) {
-  return {
-    date,
-    routes: [],
-    updatedAt: null
-  };
-}
-
-function routeUid() {
-  return 'rt_' + Math.random().toString(36).slice(2, 10);
-}
-
-function loadReminderSettings() {
-  const raw = localStorage.getItem(REMINDER_STORAGE_KEY);
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      return { ...DEFAULT_REMINDER_SETTINGS, ...parsed };
-    } catch {
-      return { ...DEFAULT_REMINDER_SETTINGS };
-    }
-  }
-  return { ...DEFAULT_REMINDER_SETTINGS };
-}
-
-function saveReminderSettings(settings) {
-  localStorage.setItem(REMINDER_STORAGE_KEY, JSON.stringify(settings));
-}
-
-function loadRiskRules() {
-  const raw = localStorage.getItem(RISK_RULES_STORAGE_KEY);
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      return { ...DEFAULT_RISK_RULES, ...parsed };
-    } catch {
-      return { ...DEFAULT_RISK_RULES };
-    }
-  }
-  return { ...DEFAULT_RISK_RULES };
-}
-
-function saveRiskRules(rules) {
-  localStorage.setItem(RISK_RULES_STORAGE_KEY, JSON.stringify(rules));
-}
-
-function loadMergeHistory() {
-  const raw = localStorage.getItem(MERGE_HISTORY_STORAGE_KEY);
-  if (raw) {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-function saveMergeHistory(history) {
-  localStorage.setItem(MERGE_HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, MERGE_HISTORY_LIMIT)));
-}
-
-function createDataSnapshot(currentRecords, currentReminderSettings, currentRoutePlans) {
-  return {
-    records: JSON.parse(JSON.stringify(currentRecords)),
-    reminderSettings: JSON.parse(JSON.stringify(currentReminderSettings)),
-    routePlans: JSON.parse(JSON.stringify(currentRoutePlans)),
-    createdAt: new Date().toISOString()
-  };
 }
 
 function getReminderStatus(item, reminderSettings) {
@@ -434,709 +275,6 @@ function reminderStatusClass(type) {
     soon: 'reminder-soon',
     none: ''
   }[type] || '';
-}
-
-function uid() {
-  return Math.random().toString(36).slice(2, 10);
-}
-
-function withIds(items) {
-  return items.map((item) => ({ id: uid(), timeline: item.timeline || [{ status: item.status, at: today, by: '系统' }], ...item }));
-}
-
-function getBusinessKey(record) {
-  return record.businessKey || record.elevatorNo || '';
-}
-
-function normalizeTimelineEntry(entry, defaultStatus) {
-  if (!entry || typeof entry !== 'object') return null;
-  return {
-    status: entry.status || defaultStatus || appConfig.primaryStatus,
-    at: entry.at || today,
-    by: entry.by || '系统',
-    ...(entry.notes ? { notes: entry.notes } : {}),
-    ...(entry.backfill ? { backfill: entry.backfill } : {}),
-    ...(entry.nextCycle ? { nextCycle: entry.nextCycle } : {})
-  };
-}
-
-function migrateRecord(record, options = {}) {
-  const now = new Date().toISOString();
-  const { refreshUpdatedAt = false } = options;
-  const migrated = { ...record };
-  
-  if (!migrated.id) {
-    migrated.id = uid();
-  }
-  
-  if (!migrated.businessKey) {
-    migrated.businessKey = migrated.elevatorNo || migrated.id;
-  }
-  
-  if (!migrated.createdAt) {
-    if (migrated.timeline && migrated.timeline.length > 0) {
-      const firstTimeline = migrated.timeline[0];
-      try {
-        const d = new Date(firstTimeline.at + 'T00:00:00');
-        migrated.createdAt = isNaN(d.getTime()) ? now : d.toISOString();
-      } catch {
-        migrated.createdAt = now;
-      }
-    } else {
-      migrated.createdAt = now;
-    }
-  }
-  
-  if (refreshUpdatedAt || !migrated.updatedAt) {
-    if (migrated.timeline && migrated.timeline.length > 0) {
-      const lastTimeline = migrated.timeline[migrated.timeline.length - 1];
-      try {
-        const d = new Date(lastTimeline.at + 'T00:00:00');
-        migrated.updatedAt = isNaN(d.getTime()) ? now : d.toISOString();
-      } catch {
-        migrated.updatedAt = now;
-      }
-    } else {
-      migrated.updatedAt = now;
-    }
-  }
-  
-  if (!migrated.timeline) {
-    migrated.timeline = [{ status: migrated.status || appConfig.primaryStatus, at: today, by: '系统迁移' }];
-  } else if (Array.isArray(migrated.timeline)) {
-    const normalizedTimeline = migrated.timeline
-      .map(e => normalizeTimelineEntry(e, migrated.status))
-      .filter(Boolean);
-    if (normalizedTimeline.length > 0) {
-      migrated.timeline = normalizedTimeline;
-    } else {
-      migrated.timeline = [{ status: migrated.status || appConfig.primaryStatus, at: today, by: '系统迁移' }];
-    }
-  }
-  
-  if (!migrated.status) {
-    migrated.status = appConfig.primaryStatus;
-  }
-  
-  return migrated;
-}
-
-function migrateRecords(records) {
-  return records.map((record) => migrateRecord(record));
-}
-
-function recordsNeedMigration(original, migrated) {
-  if (original.length !== migrated.length) return true;
-  
-  return original.some((r, i) => {
-    const m = migrated[i];
-    if (r.id !== m.id) return true;
-    if (r.businessKey !== m.businessKey) return true;
-    if (r.createdAt !== m.createdAt) return true;
-    if (r.updatedAt !== m.updatedAt) return true;
-    if (!r.timeline && m.timeline) return true;
-    if (r.timeline && !m.timeline) return true;
-    if (r.timeline && m.timeline && r.timeline.length !== m.timeline.length) return true;
-    
-    const allKeys = new Set([...Object.keys(r), ...Object.keys(m)]);
-    for (const key of allKeys) {
-      if (key === 'id' || key === 'businessKey' || key === 'createdAt' || key === 'updatedAt' || key === 'timeline') continue;
-      if (r[key] !== m[key]) return true;
-    }
-    return false;
-  });
-}
-
-function loadRecords() {
-  const raw = localStorage.getItem(appConfig.storage);
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      const migrated = migrateRecords(parsed);
-      if (recordsNeedMigration(parsed, migrated)) {
-        localStorage.setItem(appConfig.storage, JSON.stringify(migrated));
-      }
-      return migrated;
-    } catch {
-      const seeded = withIds(appConfig.seed);
-      return migrateRecords(seeded);
-    }
-  }
-  const seeded = withIds(appConfig.seed);
-  return migrateRecords(seeded);
-}
-
-const CONFLICT_FIELDS = [
-  { key: 'status', label: '状态冲突' },
-  { key: 'nextDate', label: '下次维保日期冲突' },
-  { key: 'estate', label: '楼盘名称冲突' },
-  { key: 'building', label: '楼栋编号冲突' },
-  { key: 'cycle', label: '维保周期冲突' },
-  { key: 'owner', label: '负责人冲突' },
-  { key: 'priority', label: '优先级冲突' },
-  { key: 'temperature', label: '温度读数冲突' },
-  { key: 'notes', label: '备注冲突' }
-];
-
-function detectConflicts(localRecords, importRecords) {
-  const conflicts = [];
-  const noConflicts = { localOnly: [], importOnly: [] };
-  
-  const localMap = new Map();
-  localRecords.forEach((record) => {
-    const key = getBusinessKey(record);
-    if (key) {
-      localMap.set(key, record);
-    }
-  });
-  
-  const importMap = new Map();
-  importRecords.forEach((record) => {
-    const key = getBusinessKey(record);
-    if (key) {
-      importMap.set(key, record);
-    }
-  });
-  
-  importRecords.forEach((importRecord) => {
-    const key = getBusinessKey(importRecord);
-    const localRecord = localMap.get(key);
-    
-    if (!localRecord) {
-      noConflicts.importOnly.push(importRecord);
-      return;
-    }
-    
-    const conflictTypes = [];
-    
-    CONFLICT_FIELDS.forEach(({ key: fieldKey, label }) => {
-      const localVal = localRecord[fieldKey];
-      const importVal = importRecord[fieldKey];
-      if (localVal !== importVal && (localVal || importVal)) {
-        conflictTypes.push({
-          type: fieldKey,
-          label,
-          localValue: localVal,
-          importValue: importVal
-        });
-      }
-    });
-    
-    const localTimeline = localRecord.timeline || [];
-    const importTimeline = importRecord.timeline || [];
-    const timelineConflict = detectTimelineConflict(localTimeline, importTimeline);
-    if (timelineConflict) {
-      conflictTypes.push(timelineConflict);
-    }
-    
-    if (conflictTypes.length > 0) {
-      conflicts.push({
-        key,
-        localRecord,
-        importRecord,
-        conflictTypes,
-        resolution: 'pending'
-      });
-    } else {
-      noConflicts.autoMergeable = noConflicts.autoMergeable || [];
-      noConflicts.autoMergeable.push({ localRecord, importRecord });
-    }
-  });
-  
-  localRecords.forEach((localRecord) => {
-    const key = getBusinessKey(localRecord);
-    if (!importMap.has(key)) {
-      noConflicts.localOnly.push(localRecord);
-    }
-  });
-  
-  return { conflicts, noConflicts };
-}
-
-function getTimelineEntryKey(entry) {
-  const status = entry.status || '';
-  const at = entry.at || '';
-  const by = entry.by || '';
-  const notes = entry.notes || '';
-  const backfill = entry.backfill ? JSON.stringify(entry.backfill) : '';
-  const nextCycle = entry.nextCycle ? JSON.stringify(entry.nextCycle) : '';
-  return `${status}-${at}-${by}-${notes}-${backfill}-${nextCycle}`;
-}
-
-function detectTimelineConflict(localTimeline, importTimeline) {
-  if (!localTimeline.length && !importTimeline.length) return null;
-  if (!localTimeline.length) {
-    return {
-      type: 'timeline',
-      label: '时间线追加冲突',
-      description: '本地无时间线记录，导入数据有时间线',
-      localCount: 0,
-      importCount: importTimeline.length
-    };
-  }
-  if (!importTimeline.length) {
-    return {
-      type: 'timeline',
-      label: '时间线追加冲突',
-      description: '导入数据无时间线记录，本地有时间线',
-      localCount: localTimeline.length,
-      importCount: 0
-    };
-  }
-  
-  const localLast = localTimeline[localTimeline.length - 1];
-  const importLast = importTimeline[importTimeline.length - 1];
-  
-  const localLastTime = new Date(localLast.at || 0).getTime();
-  const importLastTime = new Date(importLast.at || 0).getTime();
-  
-  const localKeys = new Set(localTimeline.map(t => getTimelineEntryKey(t)));
-  const importKeys = new Set(importTimeline.map(t => getTimelineEntryKey(t)));
-  
-  const hasUniqueLocal = localTimeline.some(t => !importKeys.has(getTimelineEntryKey(t)));
-  const hasUniqueImport = importTimeline.some(t => !localKeys.has(getTimelineEntryKey(t)));
-  
-  if (hasUniqueLocal && hasUniqueImport) {
-    return {
-      type: 'timeline',
-      label: '时间线追加冲突',
-      description: '两边都有独立的时间线记录',
-      localCount: localTimeline.length,
-      importCount: importTimeline.length,
-      localLastTime,
-      importLastTime
-    };
-  }
-  
-  if (hasUniqueImport) {
-    return {
-      type: 'timeline',
-      label: '时间线追加冲突',
-      description: '导入数据有新增的时间线记录',
-      localCount: localTimeline.length,
-      importCount: importTimeline.length
-    };
-  }
-  
-  if (hasUniqueLocal) {
-    return {
-      type: 'timeline',
-      label: '时间线追加冲突',
-      description: '本地数据有新增的时间线记录',
-      localCount: localTimeline.length,
-      importCount: importTimeline.length
-    };
-  }
-  
-  return null;
-}
-
-function mergeRecordFields(localRecord, importRecord, customMerge) {
-  const merged = { ...localRecord };
-  const allKeys = new Set([
-    ...Object.keys(localRecord || {}),
-    ...Object.keys(importRecord || {}),
-    ...Object.keys(customMerge || {})
-  ]);
-  
-  allKeys.forEach((key) => {
-    if (key === 'timeline' || key === 'id' || key === 'businessKey') return;
-    
-    if (customMerge && customMerge.hasOwnProperty(key)) {
-      merged[key] = customMerge[key];
-    } else if (importRecord && importRecord.hasOwnProperty(key) && !localRecord.hasOwnProperty(key)) {
-      merged[key] = importRecord[key];
-    } else if (localRecord && localRecord.hasOwnProperty(key)) {
-      merged[key] = localRecord[key];
-    }
-  });
-  
-  if (importRecord && importRecord.temps && importRecord.temps.length > 0) {
-    const mergedTemps = [...(localRecord.temps || [])];
-    importRecord.temps.forEach((t) => {
-      if (!mergedTemps.includes(t)) {
-        mergedTemps.push(t);
-      }
-    });
-    if (mergedTemps.length > (localRecord.temps || []).length) {
-      merged.temps = mergedTemps;
-    }
-  }
-  
-  return merged;
-}
-
-function resolveConflict(conflict, resolution, customMerge) {
-  const { localRecord, importRecord } = conflict;
-  const now = new Date().toISOString();
-  
-  switch (resolution) {
-    case 'keepLocal': {
-      const result = { ...localRecord };
-      Object.keys(importRecord || {}).forEach((key) => {
-        if (key === 'id' || key === 'businessKey' || key === 'timeline' || key === 'createdAt' || key === 'updatedAt') return;
-        if (!result.hasOwnProperty(key) && importRecord[key] !== undefined && importRecord[key] !== null && importRecord[key] !== '') {
-          result[key] = importRecord[key];
-        }
-      });
-      result.updatedAt = now;
-      if (importRecord?.temps && importRecord.temps.length > 0) {
-        const mergedTemps = [...(localRecord.temps || [])];
-        importRecord.temps.forEach((t) => {
-          if (!mergedTemps.includes(t)) mergedTemps.push(t);
-        });
-        if (mergedTemps.length > (localRecord.temps || []).length) result.temps = mergedTemps;
-      }
-      return result;
-    }
-    
-    case 'useImport': {
-      const result = { ...importRecord };
-      result.id = localRecord.id;
-      result.businessKey = localRecord.businessKey;
-      if (!result.createdAt) result.createdAt = localRecord.createdAt;
-      result.updatedAt = now;
-      if (localRecord?.temps && localRecord.temps.length > 0) {
-        const mergedTemps = [...(importRecord.temps || [])];
-        localRecord.temps.forEach((t) => {
-          if (!mergedTemps.includes(t)) mergedTemps.push(t);
-        });
-        if (mergedTemps.length > (importRecord.temps || []).length) result.temps = mergedTemps;
-      }
-      return result;
-    }
-    
-    case 'manual': {
-      const merged = mergeRecordFields(localRecord, importRecord, customMerge);
-      return {
-        ...merged,
-        timeline: mergeTimelines(localRecord.timeline || [], importRecord.timeline || []),
-        updatedAt: now
-      };
-    }
-    
-    default:
-      return localRecord;
-  }
-}
-
-function mergeTimelines(localTimeline, importTimeline) {
-  const merged = [];
-  const seen = new Set();
-  
-  const all = [...localTimeline, ...importTimeline];
-  
-  all.forEach((entry) => {
-    const key = getTimelineEntryKey(entry);
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(entry);
-    }
-  });
-  
-  merged.sort((a, b) => {
-    const timeA = new Date(a.at || 0).getTime();
-    const timeB = new Date(b.at || 0).getTime();
-    return timeA - timeB;
-  });
-  
-  return merged;
-}
-
-function buildMergeData(records, reminderSettings, routePlans, deviceInfo) {
-  const es = getEventStore();
-  const eventExport = es.exportForMerge({ includeSnapshots: true });
-  return {
-    appId: MERGE_DATA_APP_ID,
-    version: '2.0.0',
-    exportedAt: new Date().toISOString(),
-    deviceInfo: deviceInfo || { name: '未知设备', id: uid() },
-    eventStoreVersion: EVENT_STORE_VERSION,
-    data: {
-      records,
-      reminderSettings,
-      routePlans
-    },
-    eventStream: eventExport
-  };
-}
-
-function validateMergeData(parsed) {
-  const errors = [];
-  const warnings = [];
-
-  if (!parsed || typeof parsed !== 'object') {
-    errors.push('文件格式错误：不是有效的JSON对象');
-    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
-  }
-
-  if (!parsed.appId) {
-    errors.push('文件格式错误：缺少 appId 标识，可能不是本系统导出的文件');
-  } else if (parsed.appId !== MERGE_DATA_APP_ID && parsed.appId !== DATA_EXPORT_APP_ID) {
-    errors.push(`文件来源不匹配：期望 ${MERGE_DATA_APP_ID}，实际为 ${parsed.appId}`);
-  }
-
-  if (!parsed.version) {
-    warnings.push('缺少版本信息，可能存在兼容性风险');
-  } else if (parsed.version.startsWith('2.')) {
-    if (!parsed.eventStream || !Array.isArray(parsed.eventStream.events)) {
-      warnings.push('v2.x 文件缺少事件流数据，将回退到记录级合并');
-    }
-  }
-
-  if (!parsed.data || typeof parsed.data !== 'object') {
-    errors.push('文件结构错误：缺少 data 节点');
-    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
-  }
-
-  const { data } = parsed;
-
-  if (!Array.isArray(data.records)) {
-    errors.push('字段缺失：records 应为数组');
-  }
-
-  if (errors.length > 0) {
-    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
-  }
-
-  const migratedRecords = migrateRecords(data.records);
-  const summary = computeDataSummary(migratedRecords);
-
-  let eventBasedMerge = false;
-  let eventStream = null;
-  if (parsed.version && parsed.version.startsWith('2.') && parsed.eventStream && Array.isArray(parsed.eventStream.events)) {
-    eventStream = parsed.eventStream;
-    eventBasedMerge = true;
-    warnings.push(`检测到 ${parsed.eventStream.events.length} 条事件流数据，将启用细粒度事件级合并`);
-  }
-
-  return { 
-    valid: true, 
-    errors, 
-    warnings, 
-    summary, 
-    recordErrors: [], 
-    data: {
-      ...data,
-      records: migratedRecords
-    },
-    deviceInfo: parsed.deviceInfo,
-    eventBasedMerge,
-    eventStream
-  };
-}
-
-function buildExportData(records, reminderSettings, routePlans, riskRules) {
-  const es = getEventStore();
-  const eventExport = es.exportForMerge({ includeSnapshots: true });
-  return {
-    appId: DATA_EXPORT_APP_ID,
-    version: '2.0.0',
-    exportedAt: new Date().toISOString(),
-    eventStoreVersion: EVENT_STORE_VERSION,
-    data: {
-      records,
-      reminderSettings,
-      routePlans,
-      riskRules
-    },
-    eventStream: eventExport
-  };
-}
-
-function validateImportData(parsed) {
-  const errors = [];
-  const warnings = [];
-
-  if (!parsed || typeof parsed !== 'object') {
-    errors.push('文件格式错误：不是有效的JSON对象');
-    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
-  }
-
-  if (!parsed.appId) {
-    errors.push('文件格式错误：缺少 appId 标识，可能不是本系统导出的文件');
-  } else if (parsed.appId !== DATA_EXPORT_APP_ID) {
-    errors.push(`文件来源不匹配：期望 ${DATA_EXPORT_APP_ID}，实际为 ${parsed.appId}`);
-  }
-
-  if (!parsed.version) {
-    warnings.push('缺少版本信息，可能存在兼容性风险');
-  } else if (parsed.version.startsWith('2.')) {
-    if (!parsed.eventStream || !Array.isArray(parsed.eventStream.events)) {
-      warnings.push('v2.x 文件缺少事件流数据，将仅恢复记录快照');
-    } else {
-      warnings.push(`检测到 ${parsed.eventStream.events.length} 条事件流数据，将恢复完整历史时间线`);
-    }
-  } else if (parsed.version !== DATA_EXPORT_VERSION) {
-    warnings.push(`版本不一致：当前系统 v2.0.0，导入文件 v${parsed.version}，部分字段可能不兼容`);
-  }
-
-  if (!parsed.data || typeof parsed.data !== 'object') {
-    errors.push('文件结构错误：缺少 data 节点');
-    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
-  }
-
-  const { data } = parsed;
-
-  if (!Array.isArray(data.records)) {
-    errors.push('字段缺失：records 应为数组');
-  }
-
-  if (!data.reminderSettings || typeof data.reminderSettings !== 'object') {
-    errors.push('字段缺失：reminderSettings 应为对象');
-  }
-
-  if (!data.routePlans || typeof data.routePlans !== 'object') {
-    errors.push('字段缺失：routePlans 应为对象');
-  }
-
-  if (!data.riskRules || typeof data.riskRules !== 'object') {
-    warnings.push('导入文件中缺少风险规则配置，将使用系统默认值');
-  }
-
-  if (errors.length > 0) {
-    return { valid: false, errors, warnings, summary: null, recordErrors: [] };
-  }
-
-  const { recordErrors, invalidRecordCount } = validateRecordsDetail(data.records);
-  if (recordErrors.length > 0) {
-    const recordErrorSummary = `记录校验失败：共 ${invalidRecordCount} 条记录存在字段缺失或格式错误`;
-    errors.push(recordErrorSummary);
-    const summary = computeDataSummary(data.records);
-    return { valid: false, errors, warnings, summary, recordErrors, data };
-  }
-
-  const summary = computeDataSummary(data.records);
-  return { 
-    valid: true, 
-    errors, 
-    warnings, 
-    summary, 
-    recordErrors: [], 
-    data,
-    eventStream: parsed.eventStream || null
-  };
-}
-
-function validateRecordsDetail(records) {
-  const recordErrors = [];
-  const validCycles = appConfig.fields.find(f => f.key === 'cycle')?.options || [];
-  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-  const validStatuses = appConfig.statuses;
-  const fieldLabels = {};
-  appConfig.fields.forEach(f => { fieldLabels[f.key] = f.label; });
-
-  records.forEach((record, index) => {
-    const errors = [];
-
-    appConfig.fields.forEach(field => {
-      const value = record[field.key];
-      const label = field.label;
-      if (!value) {
-        errors.push({ type: 'missing', field: label, key: field.key });
-      } else if (field.key === 'cycle' && !validCycles.includes(value)) {
-        errors.push({ type: 'invalidCycle', field: label, value, key: field.key });
-      } else if (field.key === 'nextDate') {
-        if (!datePattern.test(value)) {
-          errors.push({ type: 'invalidDate', field: label, value, key: field.key });
-        } else {
-          const date = new Date(value);
-          if (isNaN(date.getTime())) {
-            errors.push({ type: 'invalidDate', field: label, value, key: field.key });
-          }
-        }
-      }
-    });
-
-    if (record.status && !validStatuses.includes(record.status)) {
-      errors.push({ type: 'invalidStatus', field: '当前状态', value: record.status, key: 'status' });
-    }
-
-    if (errors.length > 0) {
-      recordErrors.push({
-        index,
-        record,
-        errors
-      });
-    }
-  });
-
-  const seenElevatorNos = {};
-  records.forEach((record, index) => {
-    const elevatorNo = record.elevatorNo;
-    if (elevatorNo) {
-      if (seenElevatorNos[elevatorNo]) {
-        const existingError = recordErrors.find(e => e.index === index);
-        if (existingError) {
-          existingError.errors.push({ type: 'duplicate', field: '电梯编号', value: elevatorNo, key: 'elevatorNo' });
-        } else {
-          recordErrors.push({
-            index,
-            record,
-            errors: [{ type: 'duplicate', field: '电梯编号', value: elevatorNo, key: 'elevatorNo' }]
-          });
-        }
-        seenElevatorNos[elevatorNo].push(index);
-      } else {
-        seenElevatorNos[elevatorNo] = [index];
-      }
-    }
-  });
-
-  Object.entries(seenElevatorNos).forEach(([no, indices]) => {
-    if (indices.length > 1) {
-      indices.forEach(idx => {
-        const errItem = recordErrors.find(e => e.index === idx);
-        if (!errItem) {
-          recordErrors.push({
-            index: idx,
-            record: records[idx],
-            errors: [{ type: 'duplicate', field: '电梯编号', value: no, key: 'elevatorNo' }]
-          });
-        }
-      });
-    }
-  });
-
-  return {
-    recordErrors,
-    invalidRecordCount: new Set(recordErrors.map(e => e.index)).size
-  };
-}
-
-function computeDataSummary(records) {
-  const recordCount = records.length;
-  const owners = new Set();
-  let earliestDate = null;
-  let latestDate = null;
-
-  records.forEach((item) => {
-    if (item.owner) owners.add(item.owner);
-    if (item.nextDate) {
-      if (!earliestDate || item.nextDate < earliestDate) earliestDate = item.nextDate;
-      if (!latestDate || item.nextDate > latestDate) latestDate = item.nextDate;
-    }
-  });
-
-  return {
-    recordCount,
-    ownerCount: owners.size,
-    earliestDate,
-    latestDate
-  };
-}
-
-function downloadJSON(data, filename) {
-  const jsonStr = JSON.stringify(data, null, 2);
-  const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 function avg(numbers) {
@@ -1211,7 +349,7 @@ function getWeekLabel(offset = 0) {
 const weekdayLabels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
 function App() {
-  const [records, setRecords] = useState(loadRecords);
+  const [records, setRecords] = useState(() => loadRecords(appConfig.storage, appConfig.seed, { primaryStatus: appConfig.primaryStatus, today }));
   const [form, setForm] = useState(appConfig.defaultValues);
   const [filters, setFilters] = useState({ query: '', status: '全部' });
   const [selected, setSelected] = useState(null);
@@ -1565,149 +703,11 @@ function App() {
     setBackfillForm({ completedAt: '', executor: '', notes: '', nextDate: '' });
   }
 
-  function splitLineByMixedDelimiters(line) {
-    return line
-      .split(/[\t，,\s]+/)
-      .map(p => p.trim())
-      .filter(p => p !== '');
-  }
 
-  function detectFieldMapping(headerCells) {
-    const labelToKey = {};
-    appConfig.fields.forEach(f => {
-      labelToKey[f.label] = f.key;
-    });
-    const mapping = {};
-    headerCells.forEach((cell, idx) => {
-      const normalized = cell.trim();
-      if (labelToKey[normalized]) {
-        mapping[idx] = labelToKey[normalized];
-      }
-    });
-    return mapping;
-  }
-
-  function isHeaderLine(cells) {
-    const labelSet = new Set(appConfig.fields.map(f => f.label));
-    const keySet = new Set(appConfig.fields.map(f => f.key));
-    let matchCount = 0;
-    cells.forEach(cell => {
-      const normalized = cell.trim();
-      if (labelSet.has(normalized) || keySet.has(normalized)) {
-        matchCount++;
-      }
-    });
-    return matchCount >= 2;
-  }
-
-  function parseImportText(text) {
-    const rawLines = text.split('\n');
-    const nonEmptyLines = rawLines
-      .map((line, originalIdx) => ({ line: line.trim(), originalIdx }))
-      .filter(item => item.line !== '');
-
-    if (nonEmptyLines.length === 0) {
-      return { records: [], fieldMapping: null, hasHeader: false };
-    }
-
-    const firstLineCells = splitLineByMixedDelimiters(nonEmptyLines[0].line);
-    const hasHeader = isHeaderLine(firstLineCells);
-    let fieldMapping = null;
-    let dataStartIndex = 0;
-
-    if (hasHeader) {
-      fieldMapping = detectFieldMapping(firstLineCells);
-      dataStartIndex = 1;
-    }
-
-    const records = [];
-    const defaultOrder = ['estate', 'building', 'elevatorNo', 'cycle', 'nextDate', 'owner'];
-
-    for (let i = dataStartIndex; i < nonEmptyLines.length; i++) {
-      const { line, originalIdx } = nonEmptyLines[i];
-      const cells = splitLineByMixedDelimiters(line);
-      const record = {
-        lineIndex: originalIdx,
-        rawLine: line,
-        estate: '',
-        building: '',
-        elevatorNo: '',
-        cycle: '',
-        nextDate: '',
-        owner: '',
-        errors: []
-      };
-
-      if (hasHeader && fieldMapping) {
-        cells.forEach((cell, idx) => {
-          const key = fieldMapping[idx];
-          if (key && record.hasOwnProperty(key)) {
-            record[key] = cell;
-          }
-        });
-      } else {
-        defaultOrder.forEach((key, idx) => {
-          if (cells[idx]) {
-            record[key] = cells[idx];
-          }
-        });
-      }
-
-      records.push(record);
-    }
-
-    return { records, fieldMapping, hasHeader, headerCells: hasHeader ? firstLineCells : null };
-  }
-
-  function validateImportRecords(parsedRecords) {
-    const validCycles = appConfig.fields.find(f => f.key === 'cycle')?.options || [];
-    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-    const seenElevatorNos = {};
-    const recordsWithErrors = parsedRecords.map((record) => {
-      const errors = [];
-      if (!record.estate) errors.push({ type: 'missing', field: '楼盘' });
-      if (!record.building) errors.push({ type: 'missing', field: '楼栋' });
-      if (!record.elevatorNo) {
-        errors.push({ type: 'missing', field: '电梯编号' });
-      } else {
-        if (seenElevatorNos[record.elevatorNo]) {
-          errors.push({ type: 'duplicate', field: '电梯编号', value: record.elevatorNo });
-        } else {
-          seenElevatorNos[record.elevatorNo] = true;
-        }
-      }
-      if (!record.cycle) {
-        errors.push({ type: 'missing', field: '维保周期' });
-      } else if (!validCycles.includes(record.cycle)) {
-        errors.push({ type: 'invalidCycle', field: '维保周期', value: record.cycle });
-      }
-      if (!record.nextDate) {
-        errors.push({ type: 'missing', field: '下次维保日期' });
-      } else if (!datePattern.test(record.nextDate)) {
-        errors.push({ type: 'invalidDate', field: '下次维保日期', value: record.nextDate });
-      } else {
-        const date = new Date(record.nextDate);
-        if (isNaN(date.getTime())) {
-          errors.push({ type: 'invalidDate', field: '下次维保日期', value: record.nextDate });
-        }
-      }
-      if (!record.owner) errors.push({ type: 'missing', field: '负责人' });
-      return { ...record, errors };
-    });
-
-    const existingRecordNos = new Set(records.map(r => r.elevatorNo));
-    recordsWithErrors.forEach((record) => {
-      if (record.elevatorNo && existingRecordNos.has(record.elevatorNo)) {
-        record.errors.push({ type: 'duplicateExisting', field: '电梯编号', value: record.elevatorNo });
-      }
-    });
-
-    return recordsWithErrors;
-  }
 
   function handleImportPreview() {
-    const { records, fieldMapping, hasHeader, headerCells } = parseImportText(importText);
-    const validated = validateImportRecords(records);
+    const { records, fieldMapping, hasHeader, headerCells } = parseImportText(importText, appConfig);
+    const validated = validateImportRecords(records, appConfig, records);
     setParsedImport(validated);
     setImportMeta({ fieldMapping, hasHeader, headerCells });
   }
@@ -1748,74 +748,8 @@ function App() {
     setImportMeta({ fieldMapping: null, hasHeader: false, headerCells: null });
   }
 
-  function recordsChanged(prev, next) {
-    if (prev.length !== next.length) return true;
-    
-    const prevMap = new Map(prev.map(r => [r.id, r]));
-    for (const nextRecord of next) {
-      const prevRecord = prevMap.get(nextRecord.id);
-      if (!prevRecord) return true;
-      
-      const allKeys = new Set([...Object.keys(prevRecord), ...Object.keys(nextRecord)]);
-      for (const key of allKeys) {
-        if (key === 'updatedAt') continue;
-        const prevVal = prevRecord[key];
-        const nextVal = nextRecord[key];
-        if (Array.isArray(prevVal) && Array.isArray(nextVal)) {
-          if (JSON.stringify(prevVal) !== JSON.stringify(nextVal)) return true;
-        } else if (typeof prevVal === 'object' && prevVal !== null && typeof nextVal === 'object' && nextVal !== null) {
-          if (JSON.stringify(prevVal) !== JSON.stringify(nextVal)) return true;
-        } else if (prevVal !== nextVal) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
   function persist(next) {
-    const changedIds = new Set();
-    if (recordsChanged(records, next)) {
-      const prevMap = new Map(records.map(r => [r.id, r]));
-      next.forEach((r, idx) => {
-        const prev = prevMap.get(r.id);
-        if (!prev) {
-          changedIds.add(r.id);
-        } else {
-          const allKeys = new Set([...Object.keys(prev), ...Object.keys(r)]);
-          for (const key of allKeys) {
-            if (key === 'updatedAt') continue;
-            const prevVal = prev[key];
-            const nextVal = r[key];
-            let isDiff = false;
-            if (Array.isArray(prevVal) && Array.isArray(nextVal)) {
-              if (JSON.stringify(prevVal) !== JSON.stringify(nextVal)) isDiff = true;
-            } else if (typeof prevVal === 'object' && prevVal !== null && typeof nextVal === 'object' && nextVal !== null) {
-              if (JSON.stringify(prevVal) !== JSON.stringify(nextVal)) isDiff = true;
-            } else if (prevVal !== nextVal) {
-              isDiff = true;
-            }
-            if (isDiff) {
-              changedIds.add(r.id);
-              break;
-            }
-          }
-        }
-      });
-    }
-
-    const now = new Date().toISOString();
-    const normalized = next.map((record) => {
-      const migrated = migrateRecord(record);
-      if (changedIds.has(migrated.id)) {
-        migrated.updatedAt = now;
-      }
-      if (!migrated.businessKey) {
-        migrated.businessKey = migrated.elevatorNo || migrated.id;
-      }
-      return migrated;
-    });
-    
+    const normalized = normalizeRecordsForPersistence(next, records);
     setRecords(normalized);
     localStorage.setItem(appConfig.storage, JSON.stringify(normalized));
   }
@@ -2096,7 +1030,7 @@ function App() {
           return;
         }
         const parsed = JSON.parse(text);
-        const result = validateImportData(parsed);
+        const result = validateImportData(parsed, appConfig, { primaryStatus: appConfig.primaryStatus, today });
         setImportValidation(result);
       } catch (err) {
         setImportValidation({
@@ -2260,7 +1194,7 @@ function App() {
           return;
         }
         const parsed = JSON.parse(text);
-        const result = validateMergeData(parsed);
+        const result = validateMergeData(parsed, { primaryStatus: appConfig.primaryStatus, today });
         setMergeValidation(result);
         setDeviceInfo(result.deviceInfo || { name: '未知设备', id: '' });
       } catch (err) {
@@ -2326,17 +1260,7 @@ function App() {
     const conflict = mergeConflicts[conflictIndex];
     if (!conflict) return;
     
-    const initialForm = {};
-    CONFLICT_FIELDS.forEach(({ key }) => {
-      if (conflict.localRecord.hasOwnProperty(key) || conflict.importRecord.hasOwnProperty(key)) {
-        initialForm[key] = conflict.localRecord[key];
-      }
-    });
-    appConfig.fields.forEach((field) => {
-      if (!initialForm.hasOwnProperty(field.key)) {
-        initialForm[field.key] = conflict.localRecord[field.key];
-      }
-    });
+    const initialForm = buildManualMergeInitialForm(conflict, appConfig.fields);
     
     setManualMergeForm(initialForm);
     setShowManualMergeModal(true);
@@ -2419,67 +1343,27 @@ function App() {
     }
 
     if (!isEventBased) {
-      const mergedRecords = [];
-      const seenKeys = new Set();
-      
-      if (mergeNoConflicts?.localOnly) {
-        mergeNoConflicts.localOnly.forEach((record) => {
-          const key = getBusinessKey(record);
-          if (!seenKeys.has(key)) {
-            seenKeys.add(key);
-            mergedRecords.push(record);
-          }
-        });
-      }
-      
-      if (mergeNoConflicts?.importOnly) {
-        mergeNoConflicts.importOnly.forEach((record) => {
-          const key = getBusinessKey(record);
-          if (!seenKeys.has(key)) {
-            seenKeys.add(key);
-            mergedRecords.push(record);
-          }
-        });
-      }
-      
-      if (mergeNoConflicts?.autoMergeable) {
-        mergeNoConflicts.autoMergeable.forEach(({ localRecord, importRecord }) => {
-          const key = getBusinessKey(localRecord);
-          if (!seenKeys.has(key)) {
-            seenKeys.add(key);
-            const merged = mergeRecordFields(localRecord, importRecord, null);
-            mergedRecords.push(merged);
-          }
-        });
-      }
-      
-      mergeConflicts.forEach((conflict, index) => {
-        const key = conflict.key;
-        const resolution = conflictResolutions[index];
-        if (resolution && !seenKeys.has(key)) {
-          seenKeys.add(key);
-          const resolvedRecord = resolveConflict(conflict, resolution.resolution, resolution.customMerge);
-          mergedRecords.push(resolvedRecord);
-        }
-      });
-      
-      finalRecords = migrateRecords(mergedRecords);
+      finalRecords = assembleMergedRecords(mergeNoConflicts, mergeConflicts, conflictResolutions);
       
       persist(finalRecords);
 
-      const { reminderSettings: importReminderSettings, routePlans: importRoutePlans, riskRules: importRiskRules } = mergeValidation.data;
-      if (importReminderSettings) {
-        finalReminderSettings = { ...DEFAULT_REMINDER_SETTINGS, ...reminderSettings, ...importReminderSettings };
+      const { finalReminderSettings: mergedReminder, finalRoutePlans: mergedRoute, finalRiskRules: mergedRisk } = mergeImportSettings(
+        reminderSettings, routePlans, riskRules,
+        mergeValidation.data,
+        DEFAULT_REMINDER_SETTINGS, DEFAULT_RISK_RULES
+      );
+      finalReminderSettings = mergedReminder;
+      finalRoutePlans = mergedRoute;
+      finalRiskRules = mergedRisk;
+      if (mergeValidation.data.reminderSettings) {
         setReminderSettings(finalReminderSettings);
         saveReminderSettings(finalReminderSettings);
       }
-      if (importRoutePlans) {
-        finalRoutePlans = { ...routePlans, ...importRoutePlans };
+      if (mergeValidation.data.routePlans) {
         setRoutePlans(finalRoutePlans);
         saveRoutePlans(finalRoutePlans);
       }
-      if (importRiskRules) {
-        finalRiskRules = { ...DEFAULT_RISK_RULES, ...riskRules, ...importRiskRules };
+      if (mergeValidation.data.riskRules) {
         setRiskRules(finalRiskRules);
         saveRiskRules(finalRiskRules);
       }
