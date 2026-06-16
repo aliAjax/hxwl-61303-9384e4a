@@ -746,7 +746,7 @@ function downloadJSON(data, filename) {
   URL.revokeObjectURL(url);
 }
 
-function assembleMergedRecords(mergeNoConflicts, mergeConflicts, conflictResolutions) {
+function assembleMergedRecords(mergeNoConflicts, mergeConflicts, conflictResolutions, options = {}) {
   const mergedRecords = [];
   const seenKeys = new Set();
 
@@ -791,7 +791,7 @@ function assembleMergedRecords(mergeNoConflicts, mergeConflicts, conflictResolut
     }
   });
 
-  return migrateRecords(mergedRecords);
+  return migrateRecords(mergedRecords, options);
 }
 
 function mergeImportSettings(localReminderSettings, localRoutePlans, localRiskRules, importData, defaultReminderSettings, defaultRiskRules) {

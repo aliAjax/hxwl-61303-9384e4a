@@ -706,8 +706,8 @@ function App() {
 
 
   function handleImportPreview() {
-    const { records, fieldMapping, hasHeader, headerCells } = parseImportText(importText, appConfig);
-    const validated = validateImportRecords(records, appConfig, records);
+    const { records: parsedRecords, fieldMapping, hasHeader, headerCells } = parseImportText(importText, appConfig);
+    const validated = validateImportRecords(parsedRecords, appConfig, records);
     setParsedImport(validated);
     setImportMeta({ fieldMapping, hasHeader, headerCells });
   }
@@ -1074,7 +1074,7 @@ function App() {
         es.importMergeData(importValidation.eventStream);
         const rebuilt = es.rebuildState();
         
-        const rebuiltRecords = migrateRecords(rebuilt.records || newRecords);
+        const rebuiltRecords = migrateRecords(rebuilt.records || newRecords, { primaryStatus: appConfig.primaryStatus, today });
         const rebuiltReminder = rebuilt.reminderSettings || newReminderSettings;
         const rebuiltRoutes = rebuilt.routePlans || newRoutePlans;
         const rebuiltRisk = rebuilt.riskRules || finalRiskRules;
@@ -1317,7 +1317,7 @@ function App() {
         const importResult = es.importMergeData(mergeValidation.eventStream);
         const rebuilt = es.rebuildState();
         
-        finalRecords = migrateRecords(rebuilt.records || []);
+        finalRecords = migrateRecords(rebuilt.records || [], { primaryStatus: appConfig.primaryStatus, today });
         finalReminderSettings = rebuilt.reminderSettings || finalReminderSettings;
         finalRoutePlans = rebuilt.routePlans || {};
         finalRiskRules = rebuilt.riskRules || finalRiskRules;
@@ -1343,7 +1343,7 @@ function App() {
     }
 
     if (!isEventBased) {
-      finalRecords = assembleMergedRecords(mergeNoConflicts, mergeConflicts, conflictResolutions);
+      finalRecords = assembleMergedRecords(mergeNoConflicts, mergeConflicts, conflictResolutions, { primaryStatus: appConfig.primaryStatus, today });
       
       persist(finalRecords);
 
@@ -1458,7 +1458,7 @@ function App() {
     const beforeReminderCount = Object.keys(reminderSettings).length;
     const beforeRouteCount = Object.keys(routePlans).length;
     
-    const migratedRecords = migrateRecords(snapshot.records);
+    const migratedRecords = migrateRecords(snapshot.records, { primaryStatus: appConfig.primaryStatus, today });
     persist(migratedRecords);
     setReminderSettings(snapshot.reminderSettings);
     saveReminderSettings(snapshot.reminderSettings);
@@ -2436,7 +2436,7 @@ function App() {
     let finalRoutePlans = routePlans;
 
     if (entry.snapshot?.records) {
-      const migrated = migrateRecords(entry.snapshot.records);
+      const migrated = migrateRecords(entry.snapshot.records, { primaryStatus: appConfig.primaryStatus, today });
       localStorage.setItem(appConfig.storage, JSON.stringify(migrated));
       setRecords(migrated);
       finalRecords = migrated;
