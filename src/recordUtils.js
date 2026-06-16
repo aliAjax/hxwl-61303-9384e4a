@@ -64,7 +64,7 @@ function normalizeRecordsForPersistence(nextRecords, prevRecords, options = {}) 
   const changedIds = computeChangedIds(prevRecords, nextRecords);
 
   const normalized = nextRecords.map((record) => {
-    const migrated = migrateRecord(record);
+    const migrated = migrateRecord(record, options);
     if (changedIds.has(migrated.id)) {
       migrated.updatedAt = now;
     }

@@ -749,7 +749,7 @@ function App() {
   }
 
   function persist(next) {
-    const normalized = normalizeRecordsForPersistence(next, records);
+    const normalized = normalizeRecordsForPersistence(next, records, { primaryStatus: appConfig.primaryStatus, today });
     setRecords(normalized);
     localStorage.setItem(appConfig.storage, JSON.stringify(normalized));
   }
